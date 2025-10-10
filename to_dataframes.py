@@ -20,6 +20,40 @@ def load_dataframe(path):
 def data_path(outdir, name, ext='csv'):
     return os.path.join(outdir, f"{name}.{ext}")
 
+# function for getting clipped waveforms
+def tag_clipped(filename, file_id=0, sipm=False, sum=False, stpc=True):
+    with h5py.File(filename, 'r') as f:
+        # raw waveforms with values above 32760 (signed 14-bit max -1, x4)
+        up_limit = 32760
+        # raw data shape is (n_events, n_adcs, n_channels, n_samples)
+        wvfms = f['light/wvfm/data']['samples']
+        # get the (n_events, n_adcs, n_channels) as a bool with any samples > 32760
+        clip_tag = wvfms > up_limit
+        clip_tag = clip_tag.any(axis=-1)
+        # get sum channel clipped waveforms
+        if sum:
+            clip_tag_sum = clip_tag[:, 0, :]
+        else:
+            clip_tag_sum = None
+        # get stpc clipped waveforms
+        if stpc:
+            # TPCs are the first half of the channels in pairs of ADCs
+            n_channels = clip_tag.shape[2]
+            clip_tag_stpc = np.zeros((8, 2), dtype=bool)
+            for i_tpc in range(8):
+                # if i_tpc is even, then use channels 0::n_channels//2, else use channels n_channels//2:-1
+                if i_tpc % 2 == 0:
+                    clip_tag_stpc[i_tpc, 0] = clip_tag[i_tpc, 1::2, :n_channels//2].any(axis=1)
+                else:
+                    clip_tag_stpc[i_tpc, 1] = clip_tag[i_tpc, 1::2, n_channels//2:].any(axis=1)
+        else:
+            clip_tag_stpc = None
+        # get sipm clipped waveforms
+        if not sipm:
+            clip_tag_sipm = None
+    # return the clipped tags
+    return clip_tag_sipm, clip_tag_sum, clip_tag_stpc
+
 # Example: truth extraction
 def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
     with h5py.File(filename, 'r') as f:
@@ -553,16 +587,114 @@ def get_flashes(filename, file_id=0):
 
         return df_flash
 
-
 # def match_truth_sipm(truth_df, df_sipm_hits_all, tol_us=0.16):
 
-# def match_truth_sum(truth_df, df_sum_hits_all, tol_us=0.16):
+# lazy dumb code but leaving it in for now
+def det_num_to_ttype(det_num):
+    if det_num in [0, 4, 8, 12]:
+        return 0  # acl
+    elif det_num in [1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15]:
+        return 1  # lcm
+    else:
+        # error case
+        print ("Error: det_num not in expected range (0-15)")
 
-# python to_dataframes.py
-#   --stage truth sipm sum sum_tpc flashes match
-#   --nfiles 10 --indir /global/cfs/cdirs/dune/www/data/2x2/simulation/productions/MiniRun6.4_1E19_RHC/MiniRun6.4_1E19_RHC.flow/FLOW/0000000/
-#   --outdir outputs/new_matching/
-#   --overwrite
+def match_truth_sum(truth_df, df_sum_hits_all, tol_us=0.16):
+
+    # Create a new DataFrame to hold the matched results
+    df_truth_reco = truth_df.copy()
+
+    # add a column for each detector per TPC (0-8)
+    for det_idx in range(8):
+        df_truth_reco[f'det_{det_idx}'] = 0
+        df_truth_reco[f'det_{det_idx}_dtime'] = np.nan
+        df_truth_reco[f'det_{det_idx}_max'] = np.nan
+        #df_truth_reco[f'det_{det_idx}_integral'] = np.nan
+        #df_truth_reco[f'det_{det_idx}_fprompt'] = np.nan
+
+    for i_file in df_sum_hits_all['file_id'].unique():
+        # Loop over the unique events in the dataframe
+        for i_evt in df_sum_hits_all['event_id'].unique():
+            # Filter the dataframe for the current event
+            event_hits = df_sum_hits_all[(df_sum_hits_all['event_id'] == i_evt) & (df_sum_hits_all['file_id'] == i_file)]
+            event_hits = event_hits.sort_values(by='t0')
+
+            # Loop over the hits in the current event
+            for _, hit in event_hits.iterrows():
+                # Get the event ID and TPC number etc
+                sum_hit_tpc = hit['tpc']
+                sum_hit_det = hit['det']
+                sum_hit_type = det_num_to_ttype(sum_hit_det)
+                sum_hit_idx = hit['idx']
+                sum_hit_t0 = hit['t0']
+                sum_hit_max = hit['max']
+                #sum_hit_integral = hit['integral']
+                #sum_hit_fprompt = hit['fprompt']
+
+                # Calculate time residuals for all true hits
+                true_hit_times = (df_truth_reco['start_time_idx'].values * 16 / 1000).astype(float)
+                dtime = sum_hit_t0 - true_hit_times
+
+                # Update the truth dataframe for valid hits
+                cond = (df_truth_reco['file_id'] == i_file) & \
+                    (df_truth_reco['event_id'] == i_evt) & \
+                    (df_truth_reco['tpc_num'] == sum_hit_tpc) & \
+                    (dtime <= tol_us) & (dtime > 0)
+
+                if cond.sum() == 0:
+                    # how many true interactions in this evt and tpc?
+                    filtered = df_truth_reco[(df_truth_reco['event_id'] == i_evt) & (df_truth_reco['tpc_num'] == sum_hit_tpc)]
+                    if len(filtered) > 0:
+                        n_int_per_tpc = filtered['n_int_per_tpc'].values[0]
+                    else:
+                        n_int_per_tpc = 0  # or 0, depending on your needs
+                    # new entry to the dataframe, same event and tpc, but no true hit
+                    df_truth_reco = pd.concat([df_truth_reco, pd.DataFrame({
+                    'file_id': [i_file],
+                    'event_id': [i_evt],
+                    'tpc_num': [sum_hit_tpc],
+                    'n_int_per_tpc': [n_int_per_tpc],
+
+                    f'det_{sum_hit_det}': [1],
+                    f'det_{sum_hit_det}_dtime': [np.nan],
+                    f'det_{sum_hit_det}_max': [sum_hit_max],
+                    #f'det_{sum_hit_det}_integral': [sum_hit_integral],
+                    #f'det_{sum_hit_det}_fprompt': [sum_hit_fprompt],
+
+                    #'flash': [np.nan],
+                    #'flash_t0': [np.nan],
+                    #'flash_max': [np.nan],
+                    #'flash_dtime': [np.nan],
+
+                    'vertex_id': [np.nan],
+                    'start_time': [np.nan],
+                    'start_time_idx': [np.nan],
+
+                    'n_photons': [np.nan],
+                    'delta_t0': [np.nan]}
+                    )],
+                    ignore_index=True)
+
+                elif cond.sum() > 1:
+                    # If there are multiple matches, take the one with the smallest time difference
+                    # and remove from the list of potential matches
+                    min_dtime_idx = np.argmin(np.abs(dtime[cond.to_numpy()]))
+                    df_truth_reco.loc[cond, f'det_{sum_hit_det}'] = 1
+                    df_truth_reco.loc[cond, f'det_{sum_hit_det}_dtime'] = dtime[cond.to_numpy()][min_dtime_idx]
+                    df_truth_reco.loc[cond, f'det_{sum_hit_det}_max'] = sum_hit_max
+                    #df_truth_reco.loc[cond, f'det_{sum_hit_det}_integral'] = sum_hit_integral
+                    #df_truth_reco.loc[cond, f'det_{sum_hit_det}_fprompt'] = sum_hit_fprompt
+                    dtime[cond.to_numpy()][min_dtime_idx] = np.nan
+                else:
+                    # Only one match, update directly
+                    df_truth_reco.loc[cond, f'det_{sum_hit_det}'] = 1
+                    df_truth_reco.loc[cond, f'det_{sum_hit_det}_dtime'] = dtime[cond.to_numpy()]
+                    df_truth_reco.loc[cond, f'det_{sum_hit_det}_max'] = sum_hit_max
+                    #df_truth_reco.loc[cond, f'det_{sum_hit_det}_integral'] = sum_hit_integral
+                    #df_truth_reco.loc[cond, f'det_{sum_hit_det}_fprompt'] = sum_hit_fprompt
+
+    return df_truth_reco
+
 
 
 def match_truth_sum_tpc(truth_df, df_sum_tpc_hits_all, tol_us=0.16):
@@ -843,19 +975,31 @@ def main():
     # Match stage
     if 'match' in args.stage or 'all' in args.stage:
       truth = load_dataframe(data_path(args.outdir, f'truth_{nfiles_str}'))
-      if 'sipm' in args.stage or 'all' in args.stage:
-        sipm_hits = load_dataframe(data_path(args.outdir, f'sipm_hits_{nfiles_str}'))
-        #df_matched = match_truth_sipm(df_matched, sipm_hits)
+      #if 'sipm' in args.stage or 'all' in args.stage:
+      #  sipm_hits = load_dataframe(data_path(args.outdir, f'sipm_hits_{nfiles_str}'))
+      #  df_matched = match_truth_sipm(df_matched, sipm_hits)
       if 'sum' in args.stage or 'all' in args.stage:
         sum_hits = load_dataframe(data_path(args.outdir, f'sum_hits_{nfiles_str}'))
-        #df_matched = match_truth_sum(df_matched, sum_hits)
+        if 'sipm' not in args.stage or 'all' not in args.stage:
+          # start from truth if sipm hits were not requested
+          df_matched = match_truth_sum(truth, sum_hits)
+        else:
+          df_matched = match_truth_sum(df_matched, sum_hits)
       if 'sum_tpc' in args.stage or 'all' in args.stage:
         sum_tpc = load_dataframe(data_path(args.outdir, f'sum_tpc_hits_{nfiles_str}'))
-        df_matched = match_truth_sum_tpc(truth, sum_tpc)
+        if 'sipm' not in args.stage or 'sum' not in args.stage or 'all' not in args.stage:
+          # start from truth if sipm hits were not requested
+          df_matched = match_truth_sum_tpc(truth, sum_tpc)
+        else:
+          df_matched = match_truth_sum_tpc(df_matched, sum_tpc)
       if 'flashes' in args.stage or 'all' in args.stage:
         # If flashes are also requested, match them
         flashes = load_dataframe(data_path(args.outdir, f'flashes_{nfiles_str}'))
-        df_matched = match_truth_reco_flash(df_matched, flashes)
+        if ('sipm' not in args.stage and 'sum' not in args.stage and 'sum_tpc' not in args.stage) or 'all' not in args.stage:
+          # start from truth if no other reco were requested
+          df_matched = match_truth_reco_flash(truth, flashes)
+        else:
+            df_matched = match_truth_reco_flash(df_matched, flashes)
       save_dataframe(df_matched, data_path(args.outdir, f'truth_reco_match_{nfiles_str}'))
 
 
