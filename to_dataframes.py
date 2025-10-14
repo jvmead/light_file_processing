@@ -88,7 +88,10 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
 
         # get vertex position & tpc number, Enu, isCC for mc_truth/interactions/data
         int_vertex_id = f["mc_truth/interactions/data"]["vertex_id"][:]
-        int_vertex_xyz = f["mc_truth/interactions/data"]["vertex"][:]
+        #int_vertex_xyz = f["mc_truth/interactions/data"]["vertex"][:]
+        int_vertex_x = f["mc_truth/interactions/data"]["x_vert"][:]
+        int_vertex_y = f["mc_truth/interactions/data"]["y_vert"][:]
+        int_vertex_z = f["mc_truth/interactions/data"]["z_vert"][:]
         int_enu = f["mc_truth/interactions/data"]["Enu"][:]
         int_isCC = f["mc_truth/interactions/data"]["isCC"][:]
         int_inelastic = f["mc_truth/interactions/data"]["y"][:]
@@ -118,9 +121,9 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
 
         # Fill the arrays with interaction data where valid
         valid = interaction_indices != -1
-        all_int_vertex_x[valid] = int_vertex_xyz[interaction_indices[valid], 0]
-        all_int_vertex_y[valid] = int_vertex_xyz[interaction_indices[valid], 1]
-        all_int_vertex_z[valid] = int_vertex_xyz[interaction_indices[valid], 2]
+        all_int_vertex_x[valid] = int_vertex_x[interaction_indices[valid]]
+        all_int_vertex_y[valid] = int_vertex_y[interaction_indices[valid]]
+        all_int_vertex_z[valid] = int_vertex_z[interaction_indices[valid]]
 
         int_tpc_mask = (
             (all_int_vertex_x[:, None] > tpc_bounds_mm[:, 0, 0]) & (all_int_vertex_x[:, None] < tpc_bounds_mm[:, 1, 0]) &
@@ -915,12 +918,13 @@ def main():
     parser.add_argument('--dE_th', type=float, default=1.0)
     parser.add_argument('--nfiles', type=int, default=10)
     parser.add_argument('--indir', type=str, required=True)
+    parser.add_argument('--syntax', type=str, default='MiniRun6.5_1E19_RHC.flow')
     parser.add_argument('--outdir', type=str, required=True)
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
-    ftemp = os.path.join(args.indir, 'MiniRun6.4_1E19_RHC.flow.')
+    ftemp = os.path.join(args.indir, args.syntax + '.')
     fnames = [ftemp + str(i).zfill(7) + '.FLOW.hdf5' for i in range(args.nfiles)]
 
     print(f"Processing {len(fnames)} files from {args.indir} to {args.outdir}")
