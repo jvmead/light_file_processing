@@ -167,6 +167,12 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
                 vertex_segs = np.where(all_vertex_id == vertex_id)[0]
                 ev_seg_vertex = np.intersect1d(ev_seg_ids, vertex_segs)
                 seg_tpcs = seg_tpc_tot[ev_seg_vertex]
+                seg_xstart = seg_xs_tot[ev_seg_vertex]
+                seg_ystart = seg_ys_tot[ev_seg_vertex]
+                seg_zstart = seg_zs_tot[ev_seg_vertex]
+                seg_xend = seg_xe_tot[ev_seg_vertex]
+                seg_yend = seg_ye_tot[ev_seg_vertex]
+                seg_zend = seg_ze_tot[ev_seg_vertex]
                 seg_xmean = seg_xmean_tot[ev_seg_vertex]
                 seg_ymean = seg_ymean_tot[ev_seg_vertex]
                 seg_zmean = seg_zmean_tot[ev_seg_vertex]
@@ -205,6 +211,11 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
                     int_seg_x_wmean = np.average(seg_xmean[tpc_segs], weights=weights)
                     int_seg_y_wmean = np.average(seg_ymean[tpc_segs], weights=weights)
                     int_seg_z_wmean = np.average(seg_zmean[tpc_segs], weights=weights)
+                    # localisation metrics (get start and end positions of all segments in TPC and calc max distance)
+                    int_seg_starts = np.vstack((seg_xstart[tpc_segs], seg_ystart[tpc_segs], seg_zstart[tpc_segs])).T
+                    int_seg_ends = np.vstack((seg_xend[tpc_segs], seg_yend[tpc_segs], seg_zend[tpc_segs])).T
+                    int_seg_comb = np.concatenate((int_seg_starts, int_seg_ends), axis=0)
+                    int_max_distance = np.max(np.linalg.norm(int_seg_comb[:, None, :] - int_seg_comb[None, :, :], axis=-1))
 
                     # skip event if thresholds not met
                     if int_seg_nphoton_tot < n_photons_threshold:
@@ -239,6 +250,7 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
                         int_seg_x_wmean,
                         int_seg_y_wmean,
                         int_seg_z_wmean,
+                        int_max_distance,
 
                         int_tpc_num[tpc_segs[min_idx]]
                     ])
@@ -254,6 +266,7 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
             'nphoton_tot', 'dE_tot', 'n_segments',  # total deposited energy in the segments
             'x_mean_int', 'y_mean_int', 'z_mean_int',  # mean position of the segments
             'x_wmean_int', 'y_wmean_int', 'z_wmean_int',  # weighted mean position of the segments
+            'int_max_distance',
             'int_tpc_num'
         ])
 
@@ -608,12 +621,12 @@ def match_truth_sum(truth_df, df_sum_hits_all, tol_us=0.16):
     df_truth_reco = truth_df.copy()
 
     # add a column for each detector per TPC (0-8)
-    for det_idx in range(8):
-        df_truth_reco[f'det_{det_idx}'] = 0
-        df_truth_reco[f'det_{det_idx}_dtime'] = np.nan
-        df_truth_reco[f'det_{det_idx}_max'] = np.nan
-        #df_truth_reco[f'det_{det_idx}_integral'] = np.nan
-        #df_truth_reco[f'det_{det_idx}_fprompt'] = np.nan
+    for det_idx in range(16):
+        df_truth_reco[f'det_{int(det_idx)}'] = 0
+        df_truth_reco[f'det_{int(det_idx)}_dtime'] = np.nan
+        df_truth_reco[f'det_{int(det_idx)}_max'] = np.nan
+        #df_truth_reco[f'det_{int(det_idx)}_integral'] = np.nan
+        #df_truth_reco[f'det_{int(det_idx)}_fprompt'] = np.nan
 
     for i_file in df_sum_hits_all['file_id'].unique():
         # Loop over the unique events in the dataframe
@@ -658,12 +671,11 @@ def match_truth_sum(truth_df, df_sum_hits_all, tol_us=0.16):
                     'tpc_num': [sum_hit_tpc],
                     'n_int_per_tpc': [n_int_per_tpc],
 
-                    f'det_{sum_hit_det}': [1],
-                    f'det_{sum_hit_det}_dtime': [np.nan],
-                    f'det_{sum_hit_det}_max': [sum_hit_max],
-                    #f'det_{sum_hit_det}_integral': [sum_hit_integral],
-                    #f'det_{sum_hit_det}_fprompt': [sum_hit_fprompt],
-
+                    f'det_{int(sum_hit_det)}': [1],
+                    f'det_{int(sum_hit_det)}_dtime': [np.nan],
+                    f'det_{int(sum_hit_det)}_max': [sum_hit_max],
+                    #f'det_{int(sum_hit_det)}_integral': [sum_hit_integral],
+                    #f'det_{int(sum_hit_det)}_fprompt': [sum_hit_fprompt],
                     #'flash': [np.nan],
                     #'flash_t0': [np.nan],
                     #'flash_max': [np.nan],
@@ -682,23 +694,21 @@ def match_truth_sum(truth_df, df_sum_hits_all, tol_us=0.16):
                     # If there are multiple matches, take the one with the smallest time difference
                     # and remove from the list of potential matches
                     min_dtime_idx = np.argmin(np.abs(dtime[cond.to_numpy()]))
-                    df_truth_reco.loc[cond, f'det_{sum_hit_det}'] = 1
-                    df_truth_reco.loc[cond, f'det_{sum_hit_det}_dtime'] = dtime[cond.to_numpy()][min_dtime_idx]
-                    df_truth_reco.loc[cond, f'det_{sum_hit_det}_max'] = sum_hit_max
-                    #df_truth_reco.loc[cond, f'det_{sum_hit_det}_integral'] = sum_hit_integral
-                    #df_truth_reco.loc[cond, f'det_{sum_hit_det}_fprompt'] = sum_hit_fprompt
+                    df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}'] = 1
+                    df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}_dtime'] = dtime[cond.to_numpy()][min_dtime_idx]
+                    df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}_max'] = sum_hit_max
+                    #df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}_integral'] = sum_hit_integral
+                    #df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}_fprompt'] = sum_hit_fprompt
                     dtime[cond.to_numpy()][min_dtime_idx] = np.nan
                 else:
                     # Only one match, update directly
-                    df_truth_reco.loc[cond, f'det_{sum_hit_det}'] = 1
-                    df_truth_reco.loc[cond, f'det_{sum_hit_det}_dtime'] = dtime[cond.to_numpy()]
-                    df_truth_reco.loc[cond, f'det_{sum_hit_det}_max'] = sum_hit_max
-                    #df_truth_reco.loc[cond, f'det_{sum_hit_det}_integral'] = sum_hit_integral
-                    #df_truth_reco.loc[cond, f'det_{sum_hit_det}_fprompt'] = sum_hit_fprompt
+                    df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}'] = 1
+                    df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}_dtime'] = dtime[cond.to_numpy()]
+                    df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}_max'] = sum_hit_max
+                    #df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}_integral'] = sum_hit_integral
+                    #df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}_fprompt'] = sum_hit_fprompt
 
     return df_truth_reco
-
-
 
 def match_truth_sum_tpc(truth_df, df_sum_tpc_hits_all, tol_us=0.16):
 
