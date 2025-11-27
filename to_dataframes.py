@@ -668,7 +668,8 @@ def match_truth_sum(truth_df, df_sum_hits_all, tol_us=0.16):
                 cond = (df_truth_reco['file_id'] == i_file) & \
                     (df_truth_reco['event_id'] == i_evt) & \
                     (df_truth_reco['tpc_num'] == sum_hit_tpc) & \
-                    (dtime <= tol_us) & (dtime > 0)
+                    (dtime <= tol_us) & (dtime > 0) & \
+                    (df_truth_reco[f'det_{int(sum_hit_det)}'] == 0)
 
                 if cond.sum() == 0:
                     # how many true interactions in this evt and tpc?
@@ -704,21 +705,21 @@ def match_truth_sum(truth_df, df_sum_hits_all, tol_us=0.16):
                     ignore_index=True)
 
                 elif cond.sum() > 1:
-                    # If there are multiple matches,
-                    # take the one with the smallest time difference PER DETECTOR
-                    # and ONLY THEN remove from the list of potential matches
-                    for shd in sum_hit_det.unique():
-                        cond_det = cond & (sum_hit_det == shd)
-                        if cond_det.sum() == 0:
-                            continue
-                        # find the index of the minimum dtime
-                        min_dtime_idx = np.argmin(np.abs(dtime[cond_det.to_numpy()]))
-                        df_truth_reco.loc[cond_det, f'det_{int(shd)}'] = 1
-                        df_truth_reco.loc[cond_det, f'det_{int(shd)}_dtime'] = dtime[cond_det.to_numpy()][min_dtime_idx]
-                        df_truth_reco.loc[cond_det, f'det_{int(shd)}_max'] = sum_hit_max
-                        #df_truth_reco.loc[cond_det, f'det_{int(shd)}_integral'] = sum_hit_integral
-                        #df_truth_reco.loc[cond_det, f'det_{int(shd)}_fprompt'] = sum_hit_fprompt
-                        dtime[cond_det.to_numpy()][min_dtime_idx] = np.nan
+                    # Multiple matches, choose the one with the max/min dtime
+                    min_dtime_idx = np.argmin(np.abs(dtime[cond.to_numpy()]))
+                    # TO-DO: experiment with max instead
+                    max_dtime_idx = np.argmax(np.abs(dtime[cond.to_numpy()]))
+                    # Update only the row with the smallest dtime
+                    cond_indices = cond[cond].index
+                    if len(cond_indices) > min_dtime_idx:
+                        idx_to_update = cond_indices[min_dtime_idx]
+                        df_truth_reco.loc[idx_to_update, f'det_{int(sum_hit_det)}'] = 1
+                        df_truth_reco.loc[idx_to_update, f'det_{int(sum_hit_det)}_dtime'] = dtime[cond.to_numpy()][min_dtime_idx]
+                        df_truth_reco.loc[idx_to_update, f'det_{int(sum_hit_det)}_max'] = sum_hit_max
+                        #df_truth_reco.loc[idx_to_update, f'det_{int(sum_hit_det)}_integral'] = sum_hit_integral
+                        #df_truth_reco.loc[idx_to_update, f'det_{int(sum_hit_det)}_fprompt'] = sum_hit_fprompt
+                    else:
+                        print(f"[match_truth_sum] Warning: cond_indices length {len(cond_indices)} is not greater than min_dtime_idx {min_dtime_idx}")
                 else:
                     # Only one match, update directly
                     df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}'] = 1
@@ -779,7 +780,8 @@ def match_truth_sum_tpc(truth_df, df_sum_tpc_hits_all, tol_us=0.16):
             cond = (df_truth_reco['file_id'] == i_file) & \
                 (df_truth_reco['event_id'] == i_evt) & \
                 (df_truth_reco['tpc_num'] == stpc_hit_tpc) & \
-                (dtime <= tol_us) & (dtime > 0)
+                (dtime <= tol_us) & (dtime > 0) & \
+                (df_truth_reco[f'{tt_str}_hit'] == 0)
 
             if cond.sum() == 0:
                 # how many true interactions in this evt and tpc?
@@ -823,14 +825,21 @@ def match_truth_sum_tpc(truth_df, df_sum_tpc_hits_all, tol_us=0.16):
 
             elif cond.sum() > 1:
                 # If there are multiple matches, take the one with the smallest time difference
-                # and remove from the list of potential matches
                 min_dtime_idx = np.argmin(np.abs(dtime[cond.to_numpy()]))
-                df_truth_reco.loc[cond, f'{tt_str}_hit'] = 1
-                df_truth_reco.loc[cond, f'{tt_str}_dtime'] = dtime[cond.to_numpy()][min_dtime_idx]
-                df_truth_reco.loc[cond, f'{tt_str}_max'] = stpc_hit_max
-                df_truth_reco.loc[cond, f'{tt_str}_integral'] = stpc_hit_integral
-                df_truth_reco.loc[cond, f'{tt_str}_fprompt'] = stpc_hit_fprompt
-                dtime[cond.to_numpy()][min_dtime_idx] = np.nan
+                # TO-DO: experiment with max instead
+                max_dtime_idx = np.argmax(np.abs(dtime[cond.to_numpy()]))
+
+                # Update only the row with the smallest dtime
+                cond_indices = cond[cond].index
+                if len(cond_indices) > min_dtime_idx:
+                    idx_to_update = cond_indices[min_dtime_idx]
+                    df_truth_reco.loc[idx_to_update, f'{tt_str}_hit'] = 1
+                    df_truth_reco.loc[idx_to_update, f'{tt_str}_dtime'] = dtime[idx_to_update]
+                    df_truth_reco.loc[idx_to_update, f'{tt_str}_max'] = stpc_hit_max
+                    df_truth_reco.loc[idx_to_update, f'{tt_str}_integral'] = stpc_hit_integral
+                    df_truth_reco.loc[idx_to_update, f'{tt_str}_fprompt'] = stpc_hit_fprompt
+                else:
+                    print(f"Warning: cond_indices length {len(cond_indices)} is not greater than min_dtime_idx {min_dtime_idx}")
             else:
                 df_truth_reco.loc[cond, f'{tt_str}_hit'] = 1
                 df_truth_reco.loc[cond, f'{tt_str}_dtime'] = dtime[cond.to_numpy()]
