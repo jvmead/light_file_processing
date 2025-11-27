@@ -56,6 +56,7 @@ def tag_clipped(filename, file_id=0, sipm=False, sum=False, stpc=True):
 
 # Example: truth extraction
 def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
+    print(f"[get_truth] Processing file_id={file_id}: {filename}")
     with h5py.File(filename, 'r') as f:
         n_events = f['light/wvfm/data']['samples'].shape[0]
         mod_bounds_mm = np.array(f['geometry_info'].attrs['module_RO_bounds'])
@@ -157,7 +158,10 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
         seg_tpc_tot[~seg_tpc_mask.any(axis=1)] = -1
 
         rows = []
+        print(f"[get_truth] Processing {len(unique_ids)} unique events")
         for i_evt, spill_id in enumerate(unique_ids):
+            if i_evt % 100 == 0:
+                print(f"[get_truth] Progress: {i_evt}/{len(unique_ids)} events processed")
             ev_seg_ids = np.where(all_event_ids == spill_id)[0]
             #ev_seg_ids = ev_seg_ids[photons_threshold[ev_seg_ids]]
             #if len(ev_seg_ids) == 0:
@@ -254,6 +258,7 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
 
                         int_tpc_num[tpc_segs[min_idx]]
                     ])
+        print(f"[get_truth] Created {len(rows)} truth entries")
 
         df = pd.DataFrame(rows, columns=[
             'file_id', 'event_id', 'vertex_id', 'start_time',
@@ -411,6 +416,7 @@ def get_sipm_hits(filename, file_id=0):
 
 
 def get_sum_hits(filename, file_id=0):
+    print(f"[get_sum_hits] Processing file_id={file_id}: {filename}")
 
     # load file
     with h5py.File(filename, 'r') as f:
@@ -616,6 +622,7 @@ def det_num_to_ttype(det_num):
         print ("Error: det_num not in expected range (0-15)")
 
 def match_truth_sum(truth_df, df_sum_hits_all, tol_us=0.16):
+    print(f"[match_truth_sum] Starting matching with {len(truth_df)} truth entries and {len(df_sum_hits_all)} sum hits")
 
     # Create a new DataFrame to hold the matched results
     df_truth_reco = truth_df.copy()
@@ -628,9 +635,15 @@ def match_truth_sum(truth_df, df_sum_hits_all, tol_us=0.16):
         #df_truth_reco[f'det_{int(det_idx)}_integral'] = np.nan
         #df_truth_reco[f'det_{int(det_idx)}_fprompt'] = np.nan
 
-    for i_file in df_sum_hits_all['file_id'].unique():
+    file_ids = df_sum_hits_all['file_id'].unique()
+    print(f"[match_truth_sum] Processing {len(file_ids)} files")
+    for idx_f, i_file in enumerate(file_ids):
+        print(f"[match_truth_sum] Processing file {idx_f+1}/{len(file_ids)}, file_id={i_file}")
         # Loop over the unique events in the dataframe
-        for i_evt in df_sum_hits_all['event_id'].unique():
+        event_ids = df_sum_hits_all[df_sum_hits_all['file_id'] == i_file]['event_id'].unique()
+        for idx_e, i_evt in enumerate(event_ids):
+            if idx_e % 50 == 0:
+                print(f"[match_truth_sum]   File {i_file}: processing event {idx_e}/{len(event_ids)}")
             # Filter the dataframe for the current event
             event_hits = df_sum_hits_all[(df_sum_hits_all['event_id'] == i_evt) & (df_sum_hits_all['file_id'] == i_file)]
             event_hits = event_hits.sort_values(by='t0')
@@ -691,15 +704,21 @@ def match_truth_sum(truth_df, df_sum_hits_all, tol_us=0.16):
                     ignore_index=True)
 
                 elif cond.sum() > 1:
-                    # If there are multiple matches, take the one with the smallest time difference
-                    # and remove from the list of potential matches
-                    min_dtime_idx = np.argmin(np.abs(dtime[cond.to_numpy()]))
-                    df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}'] = 1
-                    df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}_dtime'] = dtime[cond.to_numpy()][min_dtime_idx]
-                    df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}_max'] = sum_hit_max
-                    #df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}_integral'] = sum_hit_integral
-                    #df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}_fprompt'] = sum_hit_fprompt
-                    dtime[cond.to_numpy()][min_dtime_idx] = np.nan
+                    # If there are multiple matches,
+                    # take the one with the smallest time difference PER DETECTOR
+                    # and ONLY THEN remove from the list of potential matches
+                    for shd in sum_hit_det.unique():
+                        cond_det = cond & (sum_hit_det == shd)
+                        if cond_det.sum() == 0:
+                            continue
+                        # find the index of the minimum dtime
+                        min_dtime_idx = np.argmin(np.abs(dtime[cond_det.to_numpy()]))
+                        df_truth_reco.loc[cond_det, f'det_{int(shd)}'] = 1
+                        df_truth_reco.loc[cond_det, f'det_{int(shd)}_dtime'] = dtime[cond_det.to_numpy()][min_dtime_idx]
+                        df_truth_reco.loc[cond_det, f'det_{int(shd)}_max'] = sum_hit_max
+                        #df_truth_reco.loc[cond_det, f'det_{int(shd)}_integral'] = sum_hit_integral
+                        #df_truth_reco.loc[cond_det, f'det_{int(shd)}_fprompt'] = sum_hit_fprompt
+                        dtime[cond_det.to_numpy()][min_dtime_idx] = np.nan
                 else:
                     # Only one match, update directly
                     df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}'] = 1
@@ -708,6 +727,7 @@ def match_truth_sum(truth_df, df_sum_hits_all, tol_us=0.16):
                     #df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}_integral'] = sum_hit_integral
                     #df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}_fprompt'] = sum_hit_fprompt
 
+    print(f"[match_truth_sum] Completed matching. Final size: {len(df_truth_reco)} entries")
     return df_truth_reco
 
 def match_truth_sum_tpc(truth_df, df_sum_tpc_hits_all, tol_us=0.16):
@@ -944,7 +964,9 @@ def main():
     # Truth
     if 'truth' in args.stage or 'all' in args.stage:
       path = data_path(args.outdir, f'truth_{nfiles_str}')
+      print(f"Truth output path: {path}")
       if not os.path.exists(path) or args.overwrite:
+        print(f"Processing truth data (overwrite={args.overwrite})...")
         df = pd.concat([get_truth(f, i, args.ph_th, args.dE_th) for i, f in enumerate(fnames)], ignore_index=True)
         save_dataframe(df, path)
       else:
@@ -960,9 +982,14 @@ def main():
         df = load_dataframe(path)
 
     # Sum hits
+    print("\n" + "="*80)
+    print("STAGE: Sum hits extraction")
+    print("="*80)
     if 'sum' in args.stage or 'all' in args.stage:
       path = data_path(args.outdir, f'sum_hits_{nfiles_str}')
+      print(f"Sum hits output path: {path}")
       if not os.path.exists(path) or args.overwrite:
+        print(f"Processing sum hits data (overwrite={args.overwrite})...")
         df = pd.concat([get_sum_hits(f, i) for i, f in enumerate(fnames)], ignore_index=True)
         save_dataframe(df, path)
       else:
@@ -987,16 +1014,25 @@ def main():
         df = load_dataframe(path)
 
     # Match stage
+    print("\n" + "="*80)
+    print("STAGE: Matching truth to reconstruction")
+    print("="*80)
     if 'match' in args.stage or 'all' in args.stage:
+      print("Loading truth dataframe...")
       truth = load_dataframe(data_path(args.outdir, f'truth_{nfiles_str}'))
+      print(f"Loaded {len(truth)} truth entries")
       #if 'sipm' in args.stage or 'all' in args.stage:
       #  sipm_hits = load_dataframe(data_path(args.outdir, f'sipm_hits_{nfiles_str}'))
       #  df_matched = match_truth_sipm(df_matched, sipm_hits)
       if 'sum' in args.stage or 'all' in args.stage:
+        print("\nLoading sum hits dataframe...")
         sum_hits = load_dataframe(data_path(args.outdir, f'sum_hits_{nfiles_str}'))
+        print(f"Loaded {len(sum_hits)} sum hits")
         if 'sipm' not in args.stage or 'all' not in args.stage:
           # start from truth if sipm hits were not requested
+          print("Matching truth to sum hits...")
           df_matched = match_truth_sum(truth, sum_hits)
+          print(f"Matched dataframe has {len(df_matched)} entries")
         else:
           df_matched = match_truth_sum(df_matched, sum_hits)
       if 'sum_tpc' in args.stage or 'all' in args.stage:
@@ -1014,7 +1050,11 @@ def main():
           df_matched = match_truth_reco_flash(truth, flashes)
         else:
             df_matched = match_truth_reco_flash(df_matched, flashes)
+      print(f"\nSaving matched dataframe with {len(df_matched)} entries...")
       save_dataframe(df_matched, data_path(args.outdir, f'truth_reco_match_{nfiles_str}'))
+      print("\n" + "="*80)
+      print("PROCESSING COMPLETE!")
+      print("="*80)
 
 
 if __name__ == "__main__":
