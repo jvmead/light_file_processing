@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import time
 import numpy as np
 import pandas as pd
 import h5py
@@ -58,19 +59,18 @@ def tag_clipped(filename, file_id=0, sipm=False, sum=False, stpc=True):
 def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
     print(f"[get_truth] Processing file_id={file_id}: {filename}")
     with h5py.File(filename, 'r') as f:
-        n_events = f['light/wvfm/data']['samples'].shape[0]
-        mod_bounds_mm = np.array(f['geometry_info'].attrs['module_RO_bounds'])
-        tpc_bounds_mm = []
+        mod_bounds_cm = np.array(f['geometry_info'].attrs['module_RO_bounds'])
+        tpc_bounds_cm = []
         max_drift_distance = f['geometry_info'].attrs['max_drift_distance']
-        for mod in mod_bounds_mm:
+        for mod in mod_bounds_cm:
             x_min, x_max = mod[0][0], mod[1][0]
             y_min, y_max = mod[0][1], mod[1][1]
             z_min, z_max = mod[0][2], mod[1][2]
             x_min_adj = x_max - max_drift_distance
             x_max_adj = x_min + max_drift_distance
-            tpc_bounds_mm.append(((x_min_adj, y_min, z_min), (x_max, y_max, z_max)))
-            tpc_bounds_mm.append(((x_min, y_min, z_min), (x_max_adj, y_max, z_max)))
-        tpc_bounds_mm = np.array(tpc_bounds_mm)
+            tpc_bounds_cm.append(((x_min_adj, y_min, z_min), (x_max, y_max, z_max)))
+            tpc_bounds_cm.append(((x_min, y_min, z_min), (x_max_adj, y_max, z_max)))
+        tpc_bounds_cm = np.array(tpc_bounds_cm)
 
         unique_ids = np.unique(f["mc_truth/segments/data"]["event_id"])
         #photons_threshold = f["mc_truth/segments/data"]["n_photons"][:] >= n_photons_threshold
@@ -127,9 +127,9 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
         all_int_vertex_z[valid] = int_vertex_z[interaction_indices[valid]]
 
         int_tpc_mask = (
-            (all_int_vertex_x[:, None] > tpc_bounds_mm[:, 0, 0]) & (all_int_vertex_x[:, None] < tpc_bounds_mm[:, 1, 0]) &
-            (all_int_vertex_y[:, None] > tpc_bounds_mm[:, 0, 1]) & (all_int_vertex_y[:, None] < tpc_bounds_mm[:, 1, 1]) &
-            (all_int_vertex_z[:, None] > tpc_bounds_mm[:, 0, 2]) & (all_int_vertex_z[:, None] < tpc_bounds_mm[:, 1, 2])
+            (all_int_vertex_x[:, None] > tpc_bounds_cm[:, 0, 0]) & (all_int_vertex_x[:, None] < tpc_bounds_cm[:, 1, 0]) &
+            (all_int_vertex_y[:, None] > tpc_bounds_cm[:, 0, 1]) & (all_int_vertex_y[:, None] < tpc_bounds_cm[:, 1, 1]) &
+            (all_int_vertex_z[:, None] > tpc_bounds_cm[:, 0, 2]) & (all_int_vertex_z[:, None] < tpc_bounds_cm[:, 1, 2])
         )
         # Find which rows have any True value (i.e., are inside a TPC)
         tpc_any = int_tpc_mask.any(axis=1)
@@ -150,9 +150,9 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
         seg_zmean_tot = (seg_zs_tot + seg_ze_tot) / 2.0
 
         seg_tpc_mask = (
-            (seg_xs_tot[:, None] > tpc_bounds_mm[:, 0, 0]) & (seg_xs_tot[:, None] < tpc_bounds_mm[:, 1, 0]) &
-            (seg_ys_tot[:, None] > tpc_bounds_mm[:, 0, 1]) & (seg_ys_tot[:, None] < tpc_bounds_mm[:, 1, 1]) &
-            (seg_zs_tot[:, None] > tpc_bounds_mm[:, 0, 2]) & (seg_zs_tot[:, None] < tpc_bounds_mm[:, 1, 2])
+            (seg_xs_tot[:, None] > tpc_bounds_cm[:, 0, 0]) & (seg_xs_tot[:, None] < tpc_bounds_cm[:, 1, 0]) &
+            (seg_ys_tot[:, None] > tpc_bounds_cm[:, 0, 1]) & (seg_ys_tot[:, None] < tpc_bounds_cm[:, 1, 1]) &
+            (seg_zs_tot[:, None] > tpc_bounds_cm[:, 0, 2]) & (seg_zs_tot[:, None] < tpc_bounds_cm[:, 1, 2])
         )
         seg_tpc_tot = np.argmax(seg_tpc_mask, axis=1)
         seg_tpc_tot[~seg_tpc_mask.any(axis=1)] = -1
@@ -182,8 +182,11 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
                 seg_zmean = seg_zmean_tot[ev_seg_vertex]
                 segment_times = all_t0_start[ev_seg_vertex]
                 segment_idx = segment_times % 1.2e6 * (1000.0 / 16.0) + 100
-                segment_n_photons = all_n_photons[ev_seg_vertex]
                 #segment_dE_tot = seg_de_tot[ev_seg_vertex]
+
+                # Create vertex-local arrays for use with tpc_segs indices
+                seg_de = seg_de_tot[ev_seg_vertex]
+                seg_nphotons = all_n_photons[ev_seg_vertex]
 
                 int_x = all_int_vertex_x[ev_seg_vertex]
                 int_y = all_int_vertex_y[ev_seg_vertex]
@@ -200,18 +203,20 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
                     tpc_segs = np.where(seg_tpcs == tpc)[0]
                     if len(tpc_segs) == 0:
                         continue
-                    min_idx = np.argmin(segment_times[tpc_segs])
                     int_tpc_nsegs = len(tpc_segs)
 
+                    # get first segment
+                    first_seg_idx = np.argmin(segment_times[tpc_segs])
+
                     # total deposited energy in the segments
-                    int_seg_dE_tot = np.sum(seg_de_tot[tpc_segs])
-                    int_seg_nphoton_tot = np.sum(all_n_photons[tpc_segs])
+                    int_seg_dE_tot = np.sum(seg_de[tpc_segs])
+                    int_seg_nphoton_tot = np.sum(seg_nphotons[tpc_segs])
                     # mean position of the segments
                     int_seg_x_mean = np.mean(seg_xmean[tpc_segs])
                     int_seg_y_mean = np.mean(seg_ymean[tpc_segs])
                     int_seg_z_mean = np.mean(seg_zmean[tpc_segs])
                     # weighted by dE deposited
-                    weights = seg_de_tot[tpc_segs]
+                    weights = seg_de[tpc_segs]
                     int_seg_x_wmean = np.average(seg_xmean[tpc_segs], weights=weights)
                     int_seg_y_wmean = np.average(seg_ymean[tpc_segs], weights=weights)
                     int_seg_z_wmean = np.average(seg_zmean[tpc_segs], weights=weights)
@@ -228,22 +233,21 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
                        continue
 
                     rows.append([
-                        file_id, i_evt, vertex_id,
-                        segment_times[tpc_segs[min_idx]],
-                        segment_idx[min_idx], tpc,
-                        segment_n_photons[tpc_segs[min_idx]],
-                        seg_xmean[tpc_segs[min_idx]],
-                        seg_ymean[tpc_segs[min_idx]],
-                        seg_zmean[tpc_segs[min_idx]],
-                        int_x[tpc_segs[min_idx]],
-                        int_y[tpc_segs[min_idx]],
-                        int_z[tpc_segs[min_idx]],
-                        int_enu[tpc_segs[min_idx]],
-                        int_isCC[tpc_segs[min_idx]],
-                        int_inelasticity[tpc_segs[min_idx]],
-                        int_Q2[tpc_segs[min_idx]],
-                        int_lpdg[tpc_segs[min_idx]],
-                        int_npdg[tpc_segs[min_idx]],
+                        file_id,
+                        i_evt,
+                        vertex_id,
+                        tpc,
+                        segment_times[tpc_segs[first_seg_idx]],
+                        segment_idx[tpc_segs[first_seg_idx]],
+                        int_x[tpc_segs[first_seg_idx]],
+                        int_y[tpc_segs[first_seg_idx]],
+                        int_z[tpc_segs[first_seg_idx]],
+                        int_enu[tpc_segs[first_seg_idx]],
+                        int_isCC[tpc_segs[first_seg_idx]],
+                        int_inelasticity[tpc_segs[first_seg_idx]],
+                        int_Q2[tpc_segs[first_seg_idx]],
+                        int_lpdg[tpc_segs[first_seg_idx]],
+                        int_npdg[tpc_segs[first_seg_idx]],
 
                         int_seg_nphoton_tot,
                         int_seg_dE_tot,
@@ -256,14 +260,13 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
                         int_seg_z_wmean,
                         int_max_distance,
 
-                        int_tpc_num[tpc_segs[min_idx]]
+                        int_tpc_num[tpc_segs[first_seg_idx]]
                     ])
         print(f"[get_truth] Created {len(rows)} truth entries")
 
         df = pd.DataFrame(rows, columns=[
-            'file_id', 'event_id', 'vertex_id', 'start_time',
-            'start_time_idx', 'tpc_num', 'n_photons',
-            'x_mean', 'y_mean', 'z_mean',
+            'file_id', 'event_id', 'vertex_id', 'tpc_num',
+            'start_time', 'start_time_idx',
             'vertex_x', 'vertex_y', 'vertex_z',
             'enu', 'isCC', 'inelasticity', 'Q2',
             'lep_pdg', 'nu_pdg',
@@ -321,6 +324,7 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
         '''
 
         # add delta_Ifrac_nphotons: fractional difference in total photons (n_photons)
+        '''
         df['delta_Ifrac_nphotons'] = np.nan
         for (file_id, event_id, tpc_num), group in df.groupby(['file_id', 'event_id', 'tpc_num']):
             group = group.sort_values(by='start_time').reset_index()
@@ -330,12 +334,9 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
             df.loc[group['index'], 'delta_Ifrac_nphotons'] = delta_Ifrac_nphotons.values
             # if the first interaction, set to nan
             df.loc[group['index'].iloc[0], 'delta_Ifrac_nphotons'] = np.nan
-
-
-
-
-
+        '''
         return df
+
 
 def get_sipm_hits(filename, file_id=0):
 
@@ -660,24 +661,35 @@ def match_truth_sum(truth_df, df_sum_hits_all, tol_us=0.16):
                 #sum_hit_integral = hit['integral']
                 #sum_hit_fprompt = hit['fprompt']
 
-                # Calculate time residuals for all true hits
-                true_hit_times = (df_truth_reco['start_time_idx'].values * 16 / 1000).astype(float)
-                dtime = sum_hit_t0 - true_hit_times
+                # Pre-filter to current file/event/TPC before calculating dtime
+                # This avoids computing dtime for all accumulated rows (inefficient and error-prone)
+                base_cond = (df_truth_reco['file_id'] == i_file) & \
+                            (df_truth_reco['event_id'] == i_evt) & \
+                            (df_truth_reco['tpc_num'] == sum_hit_tpc) & \
+                            (df_truth_reco['vertex_id'].notna()) & \
+                            (df_truth_reco[f'det_{int(sum_hit_det)}'] == 0)
+
+                # Calculate time residuals only for potentially matching rows
+                relevant_times = (df_truth_reco.loc[base_cond, 'start_time_idx'].values * 16 / 1000).astype(float)
+                dtime_relevant = sum_hit_t0 - relevant_times
+
+                # Create full dtime array for compatibility with downstream code
+                dtime = np.full(len(df_truth_reco), np.nan)
+                dtime[base_cond] = dtime_relevant
 
                 # Update the truth dataframe for valid hits
-                cond = (df_truth_reco['file_id'] == i_file) & \
-                    (df_truth_reco['event_id'] == i_evt) & \
-                    (df_truth_reco['tpc_num'] == sum_hit_tpc) & \
-                    (dtime <= tol_us) & (dtime > 0) & \
-                    (df_truth_reco[f'det_{int(sum_hit_det)}'] == 0)
+                cond = base_cond & (dtime <= tol_us) & (dtime > 0)
 
                 if cond.sum() == 0:
                     # how many true interactions in this evt and tpc?
-                    filtered = df_truth_reco[(df_truth_reco['event_id'] == i_evt) & (df_truth_reco['tpc_num'] == sum_hit_tpc)]
+                    filtered = df_truth_reco[(df_truth_reco['file_id'] == i_file) & \
+                                              (df_truth_reco['event_id'] == i_evt) & \
+                                                (df_truth_reco['tpc_num'] == sum_hit_tpc)]
                     if len(filtered) > 0:
                         n_int_per_tpc = filtered['n_int_per_tpc'].values[0]
                     else:
                         n_int_per_tpc = 0  # or 0, depending on your needs
+
                     # new entry to the dataframe, same event and tpc, but no true hit
                     df_truth_reco = pd.concat([df_truth_reco, pd.DataFrame({
                     'file_id': [i_file],
@@ -711,15 +723,15 @@ def match_truth_sum(truth_df, df_sum_hits_all, tol_us=0.16):
                     max_dtime_idx = np.argmax(np.abs(dtime[cond.to_numpy()]))
                     # Update only the row with the smallest dtime
                     cond_indices = cond[cond].index
-                    if len(cond_indices) > min_dtime_idx:
-                        idx_to_update = cond_indices[min_dtime_idx]
+                    if len(cond_indices) > max_dtime_idx:
+                        idx_to_update = cond_indices[max_dtime_idx]
                         df_truth_reco.loc[idx_to_update, f'det_{int(sum_hit_det)}'] = 1
-                        df_truth_reco.loc[idx_to_update, f'det_{int(sum_hit_det)}_dtime'] = dtime[cond.to_numpy()][min_dtime_idx]
+                        df_truth_reco.loc[idx_to_update, f'det_{int(sum_hit_det)}_dtime'] = dtime[cond.to_numpy()][max_dtime_idx]
                         df_truth_reco.loc[idx_to_update, f'det_{int(sum_hit_det)}_max'] = sum_hit_max
                         #df_truth_reco.loc[idx_to_update, f'det_{int(sum_hit_det)}_integral'] = sum_hit_integral
                         #df_truth_reco.loc[idx_to_update, f'det_{int(sum_hit_det)}_fprompt'] = sum_hit_fprompt
                     else:
-                        print(f"[match_truth_sum] Warning: cond_indices length {len(cond_indices)} is not greater than min_dtime_idx {min_dtime_idx}")
+                        print(f"[match_truth_sum] Warning: cond_indices length {len(cond_indices)} is not greater than max_dtime_idx {max_dtime_idx}")
                 else:
                     # Only one match, update directly
                     df_truth_reco.loc[cond, f'det_{int(sum_hit_det)}'] = 1
@@ -785,7 +797,9 @@ def match_truth_sum_tpc(truth_df, df_sum_tpc_hits_all, tol_us=0.16):
 
             if cond.sum() == 0:
                 # how many true interactions in this evt and tpc?
-                filtered = df_truth_reco[(df_truth_reco['event_id'] == i_evt) & (df_truth_reco['tpc_num'] == stpc_hit_tpc)]
+                filtered = df_truth_reco[(df_truth_reco['file_id'] == i_file) & \
+                                          (df_truth_reco['event_id'] == i_evt) & \
+                                           (df_truth_reco['tpc_num'] == stpc_hit_tpc)]
                 if len(filtered) > 0:
                     n_int_per_tpc = filtered['n_int_per_tpc'].values[0]
                 else:
@@ -831,15 +845,15 @@ def match_truth_sum_tpc(truth_df, df_sum_tpc_hits_all, tol_us=0.16):
 
                 # Update only the row with the smallest dtime
                 cond_indices = cond[cond].index
-                if len(cond_indices) > min_dtime_idx:
-                    idx_to_update = cond_indices[min_dtime_idx]
+                if len(cond_indices) > max_dtime_idx:
+                    idx_to_update = cond_indices[max_dtime_idx]
                     df_truth_reco.loc[idx_to_update, f'{tt_str}_hit'] = 1
                     df_truth_reco.loc[idx_to_update, f'{tt_str}_dtime'] = dtime[idx_to_update]
                     df_truth_reco.loc[idx_to_update, f'{tt_str}_max'] = stpc_hit_max
                     df_truth_reco.loc[idx_to_update, f'{tt_str}_integral'] = stpc_hit_integral
                     df_truth_reco.loc[idx_to_update, f'{tt_str}_fprompt'] = stpc_hit_fprompt
                 else:
-                    print(f"Warning: cond_indices length {len(cond_indices)} is not greater than min_dtime_idx {min_dtime_idx}")
+                    print(f"Warning: cond_indices length {len(cond_indices)} is not greater than max_dtime_idx {max_dtime_idx}")
             else:
                 df_truth_reco.loc[cond, f'{tt_str}_hit'] = 1
                 df_truth_reco.loc[cond, f'{tt_str}_dtime'] = dtime[cond.to_numpy()]
@@ -886,12 +900,13 @@ def match_truth_reco_flash(truth_df, df_flashes_all, tol_us=0.16):
               cond = (df_truth_reco['file_id'] == i_file) & \
                   (df_truth_reco['event_id'] == i_evt) & \
                   (df_truth_reco['tpc_num'] == flash_tpc) & \
-                  (dtime <= tol_us) & (dtime > 0)
+                  (dtime <= tol_us) & (dtime > 0) & \
+                  (df_truth_reco['flash'] == 0)
 
               if cond.sum() == 0:
                   # how many true interactions in this evt and tpc?
-                  filtered = df_truth_reco[ (df_truth_reco['file_id'] == i_file) & \
-                                          (df_truth_reco['event_id'] == i_evt) & \
+                  filtered = df_truth_reco[(df_truth_reco['file_id'] == i_file) & \
+                                            (df_truth_reco['event_id'] == i_evt) & \
                                               (df_truth_reco['tpc_num'] == flash_tpc)]
                   if len(filtered) > 0:
                       n_int_per_tpc = filtered['n_int_per_tpc'].values[0]
@@ -934,12 +949,18 @@ def match_truth_reco_flash(truth_df, df_flashes_all, tol_us=0.16):
                     # If there are multiple matches, take the one with the smallest time difference
                     # and remove from the list of potential matches
                     min_dtime_idx = np.argmin(np.abs(dtime[cond.to_numpy()]))
-                    df_truth_reco.loc[cond, 'flash'] = 1
-                    df_truth_reco.loc[cond, 'flash_t0'] = flash_t0
-                    df_truth_reco.loc[cond, 'flash_max'] = flash_max
-                    df_truth_reco.loc[cond, 'flash_sum'] = flash_sum
-                    df_truth_reco.loc[cond, 'flash_dtime'] = dtime[cond.to_numpy()][min_dtime_idx]
-                    dtime[cond.to_numpy()][min_dtime_idx] = np.nan  # remove this match from future iterations
+                    # TO-DO: experiment with max instead
+                    max_dtime_idx = np.argmax(np.abs(dtime[cond.to_numpy()]))
+
+                    # Update only the row with the smallest dtime
+                    cond_indices = cond[cond].index
+                    if len(cond_indices) > max_dtime_idx:
+                        idx_to_update = cond_indices[max_dtime_idx]
+                        df_truth_reco.loc[idx_to_update, 'flash'] = 1
+                        df_truth_reco.loc[idx_to_update, 'flash_t0'] = flash_t0
+                        df_truth_reco.loc[idx_to_update, 'flash_max'] = flash_max
+                        df_truth_reco.loc[idx_to_update, 'flash_sum'] = flash_sum
+                        df_truth_reco.loc[idx_to_update, 'flash_dtime'] = dtime[idx_to_update]
               else:
                   df_truth_reco.loc[cond, 'flash'] = 1
                   df_truth_reco.loc[cond, 'flash_t0'] = flash_t0
@@ -951,6 +972,9 @@ def match_truth_reco_flash(truth_df, df_flashes_all, tol_us=0.16):
 
 
 def main():
+
+    timestart = time.time()
+
     parser = argparse.ArgumentParser(description="DUNE ND light readout modular pipeline")
     parser.add_argument('--stage', nargs='+', choices=['truth', 'sipm', 'sum', 'sum_tpc', 'flashes', 'match', 'all'], default=['all'])
     parser.add_argument('--ph_th', type=int, default=2e4)
@@ -1065,6 +1089,9 @@ def main():
       print("PROCESSING COMPLETE!")
       print("="*80)
 
+    timeend = time.time()
+    # time per file
+    print(f"Average time per file: {(timeend - timestart) / len(fnames):.2f} seconds")
 
 if __name__ == "__main__":
     main()
