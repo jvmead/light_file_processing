@@ -15,11 +15,14 @@ import numpy as np
 import pandas as pd
 import h5py
 from h5flow.data import dereference
+from scipy.spatial.distance import pdist
 import argparse
 import time
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 import warnings
+import traceback
+import gc
 warnings.filterwarnings('ignore')
 
 # Helper to save/load dataframes
@@ -94,7 +97,7 @@ def add_delta_columns(df):
     df['delta_y'] = np.nan
     df['delta_z'] = np.nan
     df['delta_R'] = np.nan
-    df['delta_Ifrac_nphotons'] = np.nan
+    # df['delta_Ifrac_nphotons'] = np.nan
 
     # Group by (file_id, event_id, tpc_num) and calculate differences
     n_groups = 0
@@ -120,20 +123,20 @@ def add_delta_columns(df):
     # Calculate delta_R from delta_x, delta_y, delta_z
     df['delta_R'] = np.sqrt(df['delta_x']**2 + df['delta_y']**2 + df['delta_z']**2)
 
-    # Delta fractional photons (again, only for valid start_time rows)
-    for (file_id, event_id, tpc_num), group in df.groupby(['file_id', 'event_id', 'tpc_num']):
-        valid = group['start_time'].notna()
-        group_valid = group[valid].sort_values(by='start_time').reset_index()
-        if len(group_valid) == 0:
-            continue
-        delta_nphotons = group_valid['n_photons'].diff().fillna(0)
-        denom = group_valid['n_photons'].shift(1).replace(0, np.nan)
-        delta_Ifrac_nphotons = delta_nphotons / denom
-        df.loc[group_valid['index'], 'delta_Ifrac_nphotons'] = delta_Ifrac_nphotons.values
-        # First interaction has nan
-        df.loc[group_valid['index'].iloc[0], 'delta_Ifrac_nphotons'] = np.nan
+    # # Delta fractional photons (again, only for valid start_time rows)
+    # for (file_id, event_id, tpc_num), group in df.groupby(['file_id', 'event_id', 'tpc_num']):
+    #     valid = group['start_time'].notna()
+    #     group_valid = group[valid].sort_values(by='start_time').reset_index()
+    #     if len(group_valid) == 0:
+    #         continue
+    #     delta_nphotons = group_valid['nphoton_tot'].diff().fillna(0)
+    #     denom = group_valid['nphoton_tot'].shift(1).replace(0, np.nan)
+    #     delta_Ifrac_nphotons = delta_nphotons / denom
+    #     df.loc[group_valid['index'], 'delta_Ifrac_nphotons'] = delta_Ifrac_nphotons.values
+    #     # First interaction has nan
+    #     df.loc[group_valid['index'].iloc[0], 'delta_Ifrac_nphotons'] = np.nan
 
-    print(f"[add_delta_columns] Processed {n_groups} groups, added 5 delta columns (only for valid truth rows)")
+    print(f"[add_delta_columns] Processed {n_groups} groups, added 4 delta columns (only for valid truth rows)")
     return df
 
 # Copy your get_truth, get_sum_hits functions here (unchanged)
@@ -252,10 +255,12 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0, chun
                 seg_xmean = seg_xmean_tot[ev_seg_vertex]
                 seg_ymean = seg_ymean_tot[ev_seg_vertex]
                 seg_zmean = seg_zmean_tot[ev_seg_vertex]
-                seg_de = seg_de_tot[ev_seg_vertex]
-                segment_n_photons = all_n_photons[ev_seg_vertex]
                 segment_times = all_t0_start[ev_seg_vertex]
                 segment_idx = segment_times % 1.2e6 * (1000.0 / 16.0) + 100
+
+                # Create vertex-local arrays for use with tpc_segs indices
+                seg_de = seg_de_tot[ev_seg_vertex]
+                seg_nphotons = all_n_photons[ev_seg_vertex]
 
                 int_x = all_int_vertex_x[ev_seg_vertex]
                 int_y = all_int_vertex_y[ev_seg_vertex]
@@ -279,7 +284,7 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0, chun
 
                     # Use local arrays (already indexed by ev_seg_vertex)
                     int_seg_dE_tot = np.sum(seg_de[tpc_segs])
-                    int_seg_nphoton_tot = np.sum(segment_n_photons[tpc_segs])
+                    int_seg_nphoton_tot = np.sum(seg_nphotons[tpc_segs])
                     int_seg_x_mean = np.mean(seg_xmean[tpc_segs])
                     int_seg_y_mean = np.mean(seg_ymean[tpc_segs])
                     int_seg_z_mean = np.mean(seg_zmean[tpc_segs])
@@ -297,7 +302,18 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0, chun
                     int_seg_starts = np.vstack((seg_xstart[tpc_segs], seg_ystart[tpc_segs], seg_zstart[tpc_segs])).T
                     int_seg_ends = np.vstack((seg_xend[tpc_segs], seg_yend[tpc_segs], seg_zend[tpc_segs])).T
                     int_seg_comb = np.concatenate((int_seg_starts, int_seg_ends), axis=0)
-                    int_max_distance = np.max(np.linalg.norm(int_seg_comb[:, None, :] - int_seg_comb[None, :, :], axis=-1))
+
+                    # Memory-efficient max distance calculation
+                    if len(int_seg_comb) > 1000:
+                        # Use fast bounding box approximation for huge interactions
+                        mins = np.min(int_seg_comb, axis=0)
+                        maxs = np.max(int_seg_comb, axis=0)
+                        int_max_distance = np.linalg.norm(maxs - mins)
+                    elif len(int_seg_comb) > 1:
+                        # Use scipy's memory-efficient pdist for normal cases
+                        int_max_distance = np.max(pdist(int_seg_comb, metric='euclidean'))
+                    else:
+                        int_max_distance = 0.0
 
                     if int_seg_nphoton_tot < n_photons_threshold:
                        continue
@@ -349,9 +365,47 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0, chun
 
         df = df[df['tpc_num'] >= 0]
         df['n_int_per_tpc'] = df.groupby(['file_id', 'event_id', 'tpc_num'])['event_id'].transform('size')
-        df['delta_t0'] = df.groupby(['file_id', 'event_id', 'tpc_num'])['start_time'].transform(lambda x: x - x.min())
 
-        return df
+        # add delta_t0 to df_truth
+        df['delta_t0'] = np.nan
+        # Calculate delta_t0 for each true interaction relative to the previous interaction
+        for (file_id, event_id, tpc_num), group in df.groupby(['file_id', 'event_id', 'tpc_num']):
+            group = group.sort_values(by='start_time').reset_index()
+            delta_t0s = group['start_time'].diff().fillna(0)
+            df.loc[group['index'], 'delta_t0'] = delta_t0s.values
+            # First interaction has nan for delta_t0
+            df.loc[group['index'].iloc[0], 'delta_t0'] = np.nan
+
+        # add delta_R (x,y,z) to df_truth
+        df['delta_x'] = np.nan
+        df['delta_y'] = np.nan
+        df['delta_z'] = np.nan
+        for (file_id, event_id, tpc_num), group in df.groupby(['file_id', 'event_id', 'tpc_num']):
+            group = group.sort_values(by='start_time').reset_index()
+            delta_xs = group['x_wmean_int'].diff().fillna(0)
+            delta_ys = group['y_wmean_int'].diff().fillna(0)
+            delta_zs = group['z_wmean_int'].diff().fillna(0)
+            df.loc[group['index'], 'delta_x'] = delta_xs.values
+            df.loc[group['index'], 'delta_y'] = delta_ys.values
+            df.loc[group['index'], 'delta_z'] = delta_zs.values
+            # First interaction has nan
+            df.loc[group['index'].iloc[0], 'delta_x'] = np.nan
+            df.loc[group['index'].iloc[0], 'delta_y'] = np.nan
+            df.loc[group['index'].iloc[0], 'delta_z'] = np.nan
+            # delta_R
+            df['delta_R'] = np.sqrt(df['delta_x']**2 + df['delta_y']**2 + df['delta_z']**2)
+
+    # Explicit cleanup of large numpy arrays loaded from HDF5
+    del (all_event_ids, all_vertex_id, all_t0_start, all_n_photons,
+         seg_xs_tot, seg_xe_tot, seg_ys_tot, seg_ye_tot, seg_zs_tot, seg_ze_tot, seg_de_tot,
+         int_vertex_id, int_vertex_x, int_vertex_y, int_vertex_z, int_enu, int_isCC,
+         int_inelastic, int_Q2, int_lpdg, int_npdg, seg_xmean_tot, seg_ymean_tot, seg_zmean_tot)
+    gc.collect()
+
+    if verbose:
+        print(f"[get_truth] Created {len(df)} truth entries")
+
+    return df
 
 
 def get_sum_hits(filename, file_id=0, chunk_size=None, verbose=True):
@@ -414,10 +468,16 @@ def get_sum_hits(filename, file_id=0, chunk_size=None, verbose=True):
         df_sum_hits = df_sum_hits.sort_values(by=['file_id', 'event_id', 'tpc', 'det', 'idx'])
         df_sum_hits = df_sum_hits.dropna(subset=['tpc'])
 
-        if verbose:
-            print(f"[get_sum_hits] Created {len(df_sum_hits)} sum hit entries")
+    # Explicit cleanup of large arrays loaded from HDF5
+    del (sum_hits_id, sum_hits_tpc, sum_hits_det, sum_hits_idx,
+         sum_hits_t0, sum_hits_max, sum_hits_nhits, sum_hits_evt,
+         sum_hits_file_id, deref_sum)
+    gc.collect()
 
-        return df_sum_hits
+    if verbose:
+        print(f"[get_sum_hits] Created {len(df_sum_hits)} sum hit entries")
+
+    return df_sum_hits
 
 
 def det_num_to_ttype(det_num):
@@ -439,7 +499,7 @@ def match_truth_sum_single_file(truth_df_file, sum_hits_df_file, tol_us=0.16, ve
     if verbose:
         print(f"[match_single_file] Matching {len(truth_df_file)} truth entries with {len(sum_hits_df_file)} sum hits")
 
-    # Initialize detector columns
+    # Start with all truth rows, initialize detector columns
     df_result = truth_df_file.copy()
     for det_idx in range(16):
         df_result[f'det_{int(det_idx)}'] = 0
@@ -448,21 +508,14 @@ def match_truth_sum_single_file(truth_df_file, sum_hits_df_file, tol_us=0.16, ve
 
     # Get file_id from the data (should be consistent for single file)
     if len(sum_hits_df_file) > 0:
-        # Start with all truth rows, initialize detector columns
-        df_result = truth_df_file.copy()
-        for det_idx in range(16):
-            df_result[f'det_{int(det_idx)}'] = 0
-            df_result[f'det_{int(det_idx)}_dtime'] = np.nan
-            df_result[f'det_{int(det_idx)}_max'] = np.nan
+        i_file = sum_hits_df_file['file_id'].iloc[0]
+    else:
+        i_file = truth_df_file['file_id'].iloc[0] if len(truth_df_file) > 0 else 0
 
-        # Get file_id from the data (should be consistent for single file)
-        if len(sum_hits_df_file) > 0:
-            i_file = sum_hits_df_file['file_id'].iloc[0]
-        else:
-            i_file = truth_df_file['file_id'].iloc[0] if len(truth_df_file) > 0 else 0
+    # List to accumulate new reco-only rows (avoids pd.concat in loop)
+    new_reco_rows = []
 
-        # Track which truth rows have been matched by a sum hit
-        matched_truth_idx = set()
+    if len(sum_hits_df_file) > 0:
 
         # Loop over all sum hits, as in the original
         for _, hit in sum_hits_df_file.sort_values(by='t0').iterrows():
@@ -491,25 +544,26 @@ def match_truth_sum_single_file(truth_df_file, sum_hits_df_file, tol_us=0.16, ve
                     n_int_per_tpc = filtered_truth['n_int_per_tpc'].values[0]
                 else:
                     n_int_per_tpc = 0
-                # new entry to the dataframe, same event and tpc, but no true hit
-                df_result = pd.concat([df_result, pd.DataFrame({
-                    'file_id': [i_file],
-                    'event_id': [i_evt],
-                    'tpc_num': [sum_hit_tpc],
-                    'n_int_per_tpc': [n_int_per_tpc],
-                    f'det_{int(sum_hit_det)}': [1],
-                    f'det_{int(sum_hit_det)}_dtime': [np.nan],
-                    f'det_{int(sum_hit_det)}_max': [sum_hit_max],
-                    'vertex_id': [np.nan],
-                    'start_time': [np.nan],
-                    'start_time_idx': [np.nan],
-                    'n_photons': [np.nan],
-                    'delta_t0': [np.nan]
-                })],
-                ignore_index=True)
+                # Create new reco-only row as dict and append to list
+                new_row = {
+                    'file_id': i_file,
+                    'event_id': i_evt,
+                    'tpc_num': sum_hit_tpc,
+                    'n_int_per_tpc': n_int_per_tpc,
+                    f'det_{int(sum_hit_det)}': 1,
+                    f'det_{int(sum_hit_det)}_dtime': np.nan,
+                    f'det_{int(sum_hit_det)}_max': sum_hit_max,
+                    'vertex_id': np.nan,
+                    'start_time': np.nan,
+                    'start_time_idx': np.nan,
+                    'nphoton_tot': np.nan,
+                    'dE_tot': np.nan,
+                    'delta_t0': np.nan
+                }
+                new_reco_rows.append(new_row)
 
             elif cond_time.sum() > 1:
-                # Multiple matches, choose the one with the smallest |dtime|
+                # Multiple matches, choose the one with the max |dtime|
                 cond_time_indices = df_result[cond_time].index
                 dtime_matches = dtime[cond_time.to_numpy()]
                 max_dtime_idx = np.argmax(np.abs(dtime_matches))
@@ -523,8 +577,12 @@ def match_truth_sum_single_file(truth_df_file, sum_hits_df_file, tol_us=0.16, ve
                 df_result.loc[cond_time, f'det_{int(sum_hit_det)}_dtime'] = dtime[cond_time.to_numpy()]
                 df_result.loc[cond_time, f'det_{int(sum_hit_det)}_max'] = sum_hit_max
 
-        # After all sum hit processing, ensure all original truth rows are present in the output
-        # (df_result already contains all truth rows, including those not matched by any reco)
+        # After loop, concatenate all new reco-only rows at once (much more efficient)
+        if new_reco_rows:
+            df_new_reco = pd.DataFrame(new_reco_rows)
+            df_result = pd.concat([df_result, df_new_reco], ignore_index=True)
+            if verbose:
+                print(f"[match_single_file] Added {len(new_reco_rows)} reco-only rows")
 
     if verbose:
         print(f"[match_single_file] Completed. Result size: {len(df_result)} entries")
@@ -547,7 +605,7 @@ def add_delta_columns(df):
     df['delta_y'] = np.nan
     df['delta_z'] = np.nan
     df['delta_R'] = np.nan
-    df['delta_Ifrac_nphotons'] = np.nan
+    # df['delta_Ifrac_nphotons'] = np.nan
 
     # Group by (file_id, event_id, tpc_num) and calculate differences
     n_groups = 0
@@ -573,20 +631,20 @@ def add_delta_columns(df):
     # Calculate delta_R from delta_x, delta_y, delta_z
     df['delta_R'] = np.sqrt(df['delta_x']**2 + df['delta_y']**2 + df['delta_z']**2)
 
-    # Delta fractional photons (again, only for valid start_time rows)
-    for (file_id, event_id, tpc_num), group in df.groupby(['file_id', 'event_id', 'tpc_num']):
-        valid = group['start_time'].notna()
-        group_valid = group[valid].sort_values(by='start_time').reset_index()
-        if len(group_valid) == 0:
-            continue
-        delta_nphotons = group_valid['n_photons'].diff().fillna(0)
-        denom = group_valid['n_photons'].shift(1).replace(0, np.nan)
-        delta_Ifrac_nphotons = delta_nphotons / denom
-        df.loc[group_valid['index'], 'delta_Ifrac_nphotons'] = delta_Ifrac_nphotons.values
-        # First interaction has nan
-        df.loc[group_valid['index'].iloc[0], 'delta_Ifrac_nphotons'] = np.nan
+    # # Delta fractional photons (again, only for valid start_time rows)
+    # for (file_id, event_id, tpc_num), group in df.groupby(['file_id', 'event_id', 'tpc_num']):
+    #     valid = group['start_time'].notna()
+    #     group_valid = group[valid].sort_values(by='start_time').reset_index()
+    #     if len(group_valid) == 0:
+    #         continue
+    #     delta_nphotons = group_valid['nphoton_tot'].diff().fillna(0)
+    #     denom = group_valid['nphoton_tot'].shift(1).replace(0, np.nan)
+    #     delta_Ifrac_nphotons = delta_nphotons / denom
+    #     df.loc[group_valid['index'], 'delta_Ifrac_nphotons'] = delta_Ifrac_nphotons.values
+    #     # First interaction has nan
+    #     df.loc[group_valid['index'].iloc[0], 'delta_Ifrac_nphotons'] = np.nan
 
-    print(f"[add_delta_columns] Processed {n_groups} groups, added 5 delta columns (only for valid truth rows)")
+    print(f"[add_delta_columns] Processed {n_groups} groups, added 4 delta columns (only for valid truth rows)")
     return df
 
 
@@ -717,9 +775,11 @@ def main():
 
         # Append results in order
         print("\nAppending results to output files...")
+        n_errors = 0
         for i_file, file_results, error in tqdm(results, desc="Writing results"):
             if error:
                 print(f"\n{error}")
+                n_errors += 1
                 continue
 
             if file_results:
@@ -729,6 +789,13 @@ def main():
                     append_dataframe(file_results['sum'], sum_hits_path)
                 if 'matched' in file_results:
                     append_dataframe(file_results['matched'], matched_path)
+
+                # Free memory after writing each file's results
+                del file_results
+                gc.collect()
+
+        if n_errors > 0:
+            print(f"\nWarning: {n_errors} files failed to process")
 
     else:
         # SEQUENTIAL PROCESSING
@@ -742,6 +809,10 @@ def main():
 
             try:
                 # Extract truth
+                df_truth = None
+                df_sum = None
+                df_matched = None
+
                 if 'truth' in args.stage or 'all' in args.stage:
                     print(f"  Extracting truth...")
                     df_truth = get_truth(fname, i_file, args.ph_th, args.dE_th, chunk_size=args.chunk_size, verbose=True)
@@ -765,9 +836,12 @@ def main():
                 file_elapsed = time.time() - file_start
                 print(f"  File completed in {file_elapsed:.1f}s")
 
+                # Explicit cleanup to free memory
+                del df_truth, df_sum, df_matched
+                gc.collect()
+
             except Exception as e:
                 print(f"  ERROR processing file {i_file}: {e}")
-                import traceback
                 traceback.print_exc()
                 print(f"  Continuing to next file...")
                 continue
@@ -779,17 +853,25 @@ def main():
         print(f"{'='*80}")
 
         if os.path.exists(matched_path):
-            print(f"\nLoading matched data from: {matched_path}")
-            df_matched = load_dataframe(matched_path)
-            print(f"Loaded {len(df_matched)} matched entries")
+            print(f"\nProcessing matched data from: {matched_path}")
+            print("Note: Processing in chunks to minimize memory usage")
 
-            # Add delta columns
-            df_matched = add_delta_columns(df_matched)
+            # Process in chunks to avoid loading entire dataset into memory
+            chunk_size = 100000  # Adjust based on available RAM
+            temp_path = matched_path + '.tmp'
 
-            # Save back
-            print(f"\nSaving updated matched data to: {matched_path}")
-            save_dataframe(df_matched, matched_path)
-            print(f"Saved {len(df_matched)} entries with delta columns")
+            first_chunk = True
+            for chunk in pd.read_csv(matched_path, chunksize=chunk_size):
+                chunk = add_delta_columns(chunk)
+                if first_chunk:
+                    chunk.to_csv(temp_path, index=False, mode='w')
+                    first_chunk = False
+                else:
+                    chunk.to_csv(temp_path, index=False, mode='a', header=False)
+
+            # Replace original with processed version
+            os.replace(temp_path, matched_path)
+            print(f"Completed adding delta columns to {matched_path}")
         else:
             print(f"Warning: Matched data file not found at {matched_path}")
 

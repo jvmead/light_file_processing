@@ -73,7 +73,6 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
         tpc_bounds_cm = np.array(tpc_bounds_cm)
 
         unique_ids = np.unique(f["mc_truth/segments/data"]["event_id"])
-        #photons_threshold = f["mc_truth/segments/data"]["n_photons"][:] >= n_photons_threshold
         all_event_ids = f["mc_truth/segments/data"]["event_id"][:]
         all_vertex_id = f["mc_truth/segments/data"]["vertex_id"][:]
         all_t0_start = f["mc_truth/segments/data"]["t0_start"][:]
@@ -85,7 +84,6 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
         seg_zs_tot = f["mc_truth/segments/data"]["z_start"][:]
         seg_ze_tot = f["mc_truth/segments/data"]["z_end"][:]
         seg_de_tot = f["mc_truth/segments/data"]["dE"][:]
-        #seg_len_tot = np.sqrt((seg_xe_tot - seg_xs_tot)**2 + (seg_ye_tot - seg_ys_tot)**2 + (seg_ze_tot - seg_zs_tot)**2)
 
         # get vertex position & tpc number, Enu, isCC for mc_truth/interactions/data
         int_vertex_id = f["mc_truth/interactions/data"]["vertex_id"][:]
@@ -448,13 +446,14 @@ def get_sum_hits(filename, file_id=0):
       # create a dataframe
       print("Creating dataframe...")
       # flatten and use first index as event_id
-      sum_hits_id = sum_hits_id.flatten()
-      sum_hits_tpc = sum_hits_tpc.flatten()
-      sum_hits_det = sum_hits_det.flatten()
-      sum_hits_idx = sum_hits_idx.flatten()
-      sum_hits_t0 = sum_hits_t0.flatten()
-      sum_hits_max = sum_hits_max.flatten()
-      sum_hits_nhits = sum_hits_nhits.flatten()
+      # Convert masked arrays to regular arrays (masked values become NaN)
+      sum_hits_id = np.ma.filled(sum_hits_id.flatten(), np.nan)
+      sum_hits_tpc = np.ma.filled(sum_hits_tpc.flatten(), np.nan)
+      sum_hits_det = np.ma.filled(sum_hits_det.flatten(), np.nan)
+      sum_hits_idx = np.ma.filled(sum_hits_idx.flatten(), np.nan)
+      sum_hits_t0 = np.ma.filled(sum_hits_t0.flatten(), np.nan)
+      sum_hits_max = np.ma.filled(sum_hits_max.flatten(), np.nan)
+      sum_hits_nhits = np.ma.filled(sum_hits_nhits.flatten(), np.nan)
 
       # extend the event id to match the shape of deref_stpc
       sum_hits_evt = np.repeat(swvfm_idx, deref_sum.shape[1])
@@ -711,7 +710,7 @@ def match_truth_sum(truth_df, df_sum_hits_all, tol_us=0.16):
                     'start_time': [np.nan],
                     'start_time_idx': [np.nan],
 
-                    'n_photons': [np.nan],
+                    'dE_tot': [np.nan],
                     'delta_t0': [np.nan]}
                     )],
                     ignore_index=True)
@@ -832,7 +831,6 @@ def match_truth_sum_tpc(truth_df, df_sum_tpc_hits_all, tol_us=0.16):
                 'start_time': [np.nan],
                 'start_time_idx': [np.nan],
 
-                'n_photons': [np.nan],
                 'delta_t0': [np.nan]}
                 )],
                 ignore_index=True)
@@ -929,7 +927,6 @@ def match_truth_reco_flash(truth_df, df_flashes_all, tol_us=0.16):
                   'start_time': [np.nan],
                   'start_time_idx': [np.nan],
 
-                  'n_photons': [np.nan],
                   'delta_t0': [np.nan],
 
                   'acl_hit': [np.nan],
