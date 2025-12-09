@@ -408,6 +408,153 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0, chun
     return df
 
 
+def get_flashes(filename, file_id=0, chunk_size=None, verbose=True):
+    if verbose:
+        print(f"[get_flashes] Processing file_id={file_id}: {os.path.basename(filename)}")
+    with h5py.File(filename, 'r') as f:
+        lrs = f['light']
+
+        flash_data = lrs['flash/data/']
+        events_refreg_flash = lrs['events/ref/light/flash/ref_region']
+        events_ref_flash = lrs['events/ref/light/flash/ref/']
+
+        flashes = []
+        event_ids = []
+
+        for i in range(events_refreg_flash.shape[0]):
+            rr = events_refreg_flash[i]
+            if rr['start'] == rr['stop']:
+                continue
+
+            # Get all flash indices for this event
+            flash_indices = events_ref_flash[rr["start"]:rr["stop"]][:, 1]
+            # Collect flash_data for these indices
+            data = flash_data[flash_indices]
+            flashes.append(data)
+            event_ids.extend([i] * len(data))  # track event id for each flash
+
+        if not flashes:
+            return pd.DataFrame()  # no valid flashes
+
+        # Concatenate into a structured array
+        flashes_arr = np.concatenate(flashes)
+
+        # Extract fields
+        flash_id = flashes_arr['id']
+        flash_tpc = flashes_arr['tpc']
+        flash_t0 = flashes_arr['sample_range'][:, 0] * 16 / 1000
+        flash_idx = flash_t0 / (16 / 1000)
+        flash_max = flashes_arr['tot_max']
+        flash_sum = flashes_arr['tot_sum']
+
+        # Count flashes per event and tpc
+        flash_nflashes = np.array([
+            np.sum((flash_tpc == tpc) & (np.array(event_ids) == eid))
+            for eid, tpc in zip(event_ids, flash_tpc)
+        ])
+
+        # file id
+        flash_file_id = np.full_like(event_ids, file_id, dtype=np.int32)
+
+        # Create DataFrame
+        df_flash = pd.DataFrame({
+            'file_id': flash_file_id,
+            'event_id': event_ids,
+            'flash_id': flash_id,
+            'tpc': flash_tpc,
+            'idx': flash_idx,
+            't0': flash_t0,
+            'max': flash_max,
+            'sum': flash_sum,
+            'nflashes': flash_nflashes
+        })
+
+        df_flash = df_flash.sort_values(by=['event_id', 'tpc', 'idx'])
+        df_flash = df_flash.dropna(subset=['tpc'])
+
+        if verbose:
+            print(f"[get_flashes] Created {len(df_flash)} flash entries")
+
+        return df_flash
+
+
+def get_sum_tpc_hits(filename, file_id=0, chunk_size=None, verbose=True):
+    if verbose:
+        print(f"[get_sum_tpc_hits] Processing file_id={file_id}: {os.path.basename(filename)}")
+
+    # load file
+    with h5py.File(filename, 'r') as f:
+      lrs = f['light']
+
+      # get sipm level hits
+      stpc_wvfms = lrs['stpc_wvfm/data/']
+      sum_tpc_hits = lrs['sum_tpc_hits/data']
+      stpc_wvfm_idx = np.linspace(0, stpc_wvfms.shape[0]-1, stpc_wvfms.shape[0], dtype=int)
+      stpc_wvfm_ref_hits = lrs['stpc_wvfm/ref/light/sum_tpc_hits/ref/']
+      deref_stpc = dereference(stpc_wvfm_idx, stpc_wvfm_ref_hits, sum_tpc_hits)
+
+      # get info
+      sum_tpc_hits_id = deref_stpc[stpc_wvfm_idx]['id']
+      sum_tpc_hits_tpc = deref_stpc[stpc_wvfm_idx]['tpc']
+      sum_tpc_hits_det = deref_stpc[stpc_wvfm_idx]['trap_type']
+      sum_tpc_hits_idx = deref_stpc[stpc_wvfm_idx]['sample_idx']
+      sum_tpc_hits_t0 = sum_tpc_hits_idx * 16 / 1000
+      sum_tpc_hits_max = deref_stpc[stpc_wvfm_idx]['max']
+
+      # integral and fprom the sum tpc hits
+      sum_tpc_hits_integral = deref_stpc[stpc_wvfm_idx]['integral']
+      sum_tpc_hits_fprompt = deref_stpc[stpc_wvfm_idx]['fprompt']
+
+      # get the number of hits in the same tpc and trap type
+      sum_tpc_hits_nhits = np.array([
+          [np.sum((event['tpc'] == tpc) & (event['trap_type'] == trap))
+          for tpc, trap in zip(event['tpc'], event['trap_type'])]
+          for event in deref_stpc
+      ])
+
+      # flatten and use first index as event_id
+      sum_tpc_hits_id = sum_tpc_hits_id.flatten()
+      sum_tpc_hits_tpc = sum_tpc_hits_tpc.flatten()
+      sum_tpc_hits_det = sum_tpc_hits_det.flatten()
+      sum_tpc_hits_idx = sum_tpc_hits_idx.flatten()
+      sum_tpc_hits_t0 = sum_tpc_hits_t0.flatten()
+      sum_tpc_hits_max = sum_tpc_hits_max.flatten()
+      sum_tpc_hits_integral = sum_tpc_hits_integral.flatten()
+      sum_tpc_hits_fprompt = sum_tpc_hits_fprompt.flatten()
+      sum_tpc_hits_nhits = sum_tpc_hits_nhits.flatten()
+
+      # extend the event id to match the shape of deref_stpc
+      sum_tpc_hits_evt = np.repeat(stpc_wvfm_idx, deref_stpc.shape[1])
+      # flatten the event id
+      sum_tpc_hits_evt = sum_tpc_hits_evt.flatten()
+
+      # file id
+      sum_tpc_hits_file_id = np.full_like(sum_tpc_hits_evt, file_id, dtype=np.int32)
+
+      if verbose:
+          print("[get_sum_tpc_hits] Creating dataframe...")
+
+      df_sum_tpc_hits = pd.DataFrame({'file_id': sum_tpc_hits_file_id,
+                                      'event_id': sum_tpc_hits_evt,
+                                      'tpc': sum_tpc_hits_tpc,
+                                      'trap_type': sum_tpc_hits_det,
+                                      'idx': sum_tpc_hits_idx,
+                                      't0': sum_tpc_hits_t0,
+                                      'max': sum_tpc_hits_max,
+                                      'integral': sum_tpc_hits_integral,
+                                      'fprompt': sum_tpc_hits_fprompt,
+                                      'nhits': sum_tpc_hits_nhits})
+
+      df_sum_tpc_hits = df_sum_tpc_hits.sort_values(by=['file_id', 'event_id', 'tpc', 'trap_type', 'idx'])
+      df_sum_tpc_hits = df_sum_tpc_hits.dropna(subset=['tpc'])
+
+      if verbose:
+          print(f"[get_sum_tpc_hits] Created {len(df_sum_tpc_hits)} sum TPC hit entries")
+
+      return df_sum_tpc_hits
+
+
+
 def get_sum_hits(filename, file_id=0, chunk_size=None, verbose=True):
     if verbose:
         print(f"[get_sum_hits] Processing file_id={file_id}: {os.path.basename(filename)}")
@@ -488,6 +635,220 @@ def det_num_to_ttype(det_num):
     else:
         print("Error: det_num not in expected range (0-15)")
         return -1
+
+
+def match_truth_flash_single_file(truth_df_file, flash_df_file, tol_us=0.16, verbose=True):
+    """
+    Match truth interactions to flashes for a single file.
+    Similar to match_truth_sum but for flash data.
+    """
+    if verbose:
+        print(f"[match_truth_flash] Matching {len(truth_df_file)} truth entries with {len(flash_df_file)} flashes")
+
+    # Start with all truth rows, initialize flash columns
+    df_result = truth_df_file.copy()
+    df_result['flash_matched'] = 0
+    df_result['flash_t0'] = np.nan
+    df_result['flash_dtime'] = np.nan
+    df_result['flash_max'] = np.nan
+    df_result['flash_sum'] = np.nan
+    df_result['flash_id'] = np.nan
+
+    # Get file_id from the data
+    if len(flash_df_file) > 0:
+        i_file = flash_df_file['file_id'].iloc[0]
+    else:
+        i_file = truth_df_file['file_id'].iloc[0] if len(truth_df_file) > 0 else 0
+
+    # List to accumulate new reco-only rows
+    new_reco_rows = []
+
+    if len(flash_df_file) > 0:
+        # Loop over all flashes
+        for _, flash in flash_df_file.sort_values(by='t0').iterrows():
+            flash_tpc = flash['tpc']
+            flash_t0 = flash['t0']
+            flash_max = flash['max']
+            flash_sum = flash['sum']
+            flash_id = flash['flash_id']
+            i_evt = flash['event_id']
+
+            true_hit_times = (df_result['start_time_idx'].values * 16 / 1000).astype(float)
+            dtime = flash_t0 - true_hit_times
+
+            # Check for matches: same file, event, tpc, not yet matched, within time window
+            cond = (df_result['file_id'] == i_file) & \
+                   (df_result['event_id'] == i_evt) & \
+                   (df_result['tpc_num'] == flash_tpc) & \
+                   (df_result['vertex_id'].notna()) & \
+                   (df_result['flash_matched'] == 0)
+            cond_time = cond & (dtime <= tol_us) & (dtime > 0)
+
+            if cond_time.sum() == 0:
+                # No match found - create reco-only row
+                filtered_truth = truth_df_file[(truth_df_file['event_id'] == i_evt) & (truth_df_file['tpc_num'] == flash_tpc)]
+                n_int_per_tpc = filtered_truth['n_int_per_tpc'].values[0] if len(filtered_truth) > 0 else 0
+
+                new_row = {
+                    'file_id': i_file,
+                    'event_id': i_evt,
+                    'tpc_num': flash_tpc,
+                    'n_int_per_tpc': n_int_per_tpc,
+                    'flash_matched': 1,
+                    'flash_t0': flash_t0,
+                    'flash_dtime': np.nan,
+                    'flash_max': flash_max,
+                    'flash_sum': flash_sum,
+                    'flash_id': flash_id,
+                    'vertex_id': np.nan,
+                    'start_time': np.nan,
+                    'start_time_idx': np.nan,
+                    'nphoton_tot': np.nan,
+                    'dE_tot': np.nan,
+                    'delta_t0': np.nan
+                }
+                new_reco_rows.append(new_row)
+
+            elif cond_time.sum() > 1:
+                # Multiple matches - choose closest in time
+                cond_time_indices = df_result[cond_time].index
+                dtime_matches = dtime[cond_time.to_numpy()]
+                min_dtime_idx = np.argmin(np.abs(dtime_matches))
+                idx_to_update = cond_time_indices[min_dtime_idx]
+                df_result.loc[idx_to_update, 'flash_matched'] = 1
+                df_result.loc[idx_to_update, 'flash_t0'] = flash_t0
+                df_result.loc[idx_to_update, 'flash_dtime'] = dtime_matches[min_dtime_idx]
+                df_result.loc[idx_to_update, 'flash_max'] = flash_max
+                df_result.loc[idx_to_update, 'flash_sum'] = flash_sum
+                df_result.loc[idx_to_update, 'flash_id'] = flash_id
+            else:
+                # Single match - update directly
+                df_result.loc[cond_time, 'flash_matched'] = 1
+                df_result.loc[cond_time, 'flash_t0'] = flash_t0
+                df_result.loc[cond_time, 'flash_dtime'] = dtime[cond_time.to_numpy()]
+                df_result.loc[cond_time, 'flash_max'] = flash_max
+                df_result.loc[cond_time, 'flash_sum'] = flash_sum
+                df_result.loc[cond_time, 'flash_id'] = flash_id
+
+        # Add all reco-only rows at once
+        if new_reco_rows:
+            df_new_reco = pd.DataFrame(new_reco_rows)
+            df_result = pd.concat([df_result, df_new_reco], ignore_index=True)
+            if verbose:
+                print(f"[match_truth_flash] Added {len(new_reco_rows)} reco-only flash rows")
+
+    if verbose:
+        print(f"[match_truth_flash] Completed. Result size: {len(df_result)} entries")
+
+    return df_result
+
+
+def match_truth_sum_tpc_single_file(truth_df_file, sum_tpc_df_file, tol_us=0.16, verbose=True):
+    """
+    Match truth interactions to sum TPC hits for a single file.
+    Similar to match_truth_sum but for sum TPC hit data (trap_type based).
+    """
+    if verbose:
+        print(f"[match_truth_sum_tpc] Matching {len(truth_df_file)} truth entries with {len(sum_tpc_df_file)} sum TPC hits")
+
+    # Start with all truth rows, initialize sum TPC hit columns for each trap type
+    df_result = truth_df_file.copy()
+    for trap_type in [0, 1]:  # 0=acl, 1=lcm
+        df_result[f'trap_{trap_type}_matched'] = 0
+        df_result[f'trap_{trap_type}_t0'] = np.nan
+        df_result[f'trap_{trap_type}_dtime'] = np.nan
+        df_result[f'trap_{trap_type}_max'] = np.nan
+        df_result[f'trap_{trap_type}_integral'] = np.nan
+        df_result[f'trap_{trap_type}_fprompt'] = np.nan
+
+    # Get file_id from the data
+    if len(sum_tpc_df_file) > 0:
+        i_file = sum_tpc_df_file['file_id'].iloc[0]
+    else:
+        i_file = truth_df_file['file_id'].iloc[0] if len(truth_df_file) > 0 else 0
+
+    # List to accumulate new reco-only rows
+    new_reco_rows = []
+
+    if len(sum_tpc_df_file) > 0:
+        # Loop over all sum TPC hits
+        for _, hit in sum_tpc_df_file.sort_values(by='t0').iterrows():
+            hit_tpc = hit['tpc']
+            hit_trap = int(hit['trap_type'])
+            hit_t0 = hit['t0']
+            hit_max = hit['max']
+            hit_integral = hit['integral']
+            hit_fprompt = hit['fprompt']
+            i_evt = hit['event_id']
+
+            true_hit_times = (df_result['start_time_idx'].values * 16 / 1000).astype(float)
+            dtime = hit_t0 - true_hit_times
+
+            # Check for matches: same file, event, tpc, trap type not yet matched, within time window
+            cond = (df_result['file_id'] == i_file) & \
+                   (df_result['event_id'] == i_evt) & \
+                   (df_result['tpc_num'] == hit_tpc) & \
+                   (df_result['vertex_id'].notna()) & \
+                   (df_result[f'trap_{hit_trap}_matched'] == 0)
+            cond_time = cond & (dtime <= tol_us) & (dtime > 0)
+
+            if cond_time.sum() == 0:
+                # No match found - create reco-only row
+                filtered_truth = truth_df_file[(truth_df_file['event_id'] == i_evt) & (truth_df_file['tpc_num'] == hit_tpc)]
+                n_int_per_tpc = filtered_truth['n_int_per_tpc'].values[0] if len(filtered_truth) > 0 else 0
+
+                new_row = {
+                    'file_id': i_file,
+                    'event_id': i_evt,
+                    'tpc_num': hit_tpc,
+                    'n_int_per_tpc': n_int_per_tpc,
+                    f'trap_{hit_trap}_matched': 1,
+                    f'trap_{hit_trap}_t0': hit_t0,
+                    f'trap_{hit_trap}_dtime': np.nan,
+                    f'trap_{hit_trap}_max': hit_max,
+                    f'trap_{hit_trap}_integral': hit_integral,
+                    f'trap_{hit_trap}_fprompt': hit_fprompt,
+                    'vertex_id': np.nan,
+                    'start_time': np.nan,
+                    'start_time_idx': np.nan,
+                    'nphoton_tot': np.nan,
+                    'dE_tot': np.nan,
+                    'delta_t0': np.nan
+                }
+                new_reco_rows.append(new_row)
+
+            elif cond_time.sum() > 1:
+                # Multiple matches - choose closest in time
+                cond_time_indices = df_result[cond_time].index
+                dtime_matches = dtime[cond_time.to_numpy()]
+                min_dtime_idx = np.argmin(np.abs(dtime_matches))
+                idx_to_update = cond_time_indices[min_dtime_idx]
+                df_result.loc[idx_to_update, f'trap_{hit_trap}_matched'] = 1
+                df_result.loc[idx_to_update, f'trap_{hit_trap}_t0'] = hit_t0
+                df_result.loc[idx_to_update, f'trap_{hit_trap}_dtime'] = dtime_matches[min_dtime_idx]
+                df_result.loc[idx_to_update, f'trap_{hit_trap}_max'] = hit_max
+                df_result.loc[idx_to_update, f'trap_{hit_trap}_integral'] = hit_integral
+                df_result.loc[idx_to_update, f'trap_{hit_trap}_fprompt'] = hit_fprompt
+            else:
+                # Single match - update directly
+                df_result.loc[cond_time, f'trap_{hit_trap}_matched'] = 1
+                df_result.loc[cond_time, f'trap_{hit_trap}_t0'] = hit_t0
+                df_result.loc[cond_time, f'trap_{hit_trap}_dtime'] = dtime[cond_time.to_numpy()]
+                df_result.loc[cond_time, f'trap_{hit_trap}_max'] = hit_max
+                df_result.loc[cond_time, f'trap_{hit_trap}_integral'] = hit_integral
+                df_result.loc[cond_time, f'trap_{hit_trap}_fprompt'] = hit_fprompt
+
+        # Add all reco-only rows at once
+        if new_reco_rows:
+            df_new_reco = pd.DataFrame(new_reco_rows)
+            df_result = pd.concat([df_result, df_new_reco], ignore_index=True)
+            if verbose:
+                print(f"[match_truth_sum_tpc] Added {len(new_reco_rows)} reco-only sum TPC hit rows")
+
+    if verbose:
+        print(f"[match_truth_sum_tpc] Completed. Result size: {len(df_result)} entries")
+
+    return df_result
 
 
 def match_truth_sum_single_file(truth_df_file, sum_hits_df_file, tol_us=0.16, verbose=True):
@@ -665,6 +1026,20 @@ def process_single_file(args_tuple):
         else:
             df_truth = None
 
+        # Extract flashes
+        if 'flash' in stages or 'all' in stages:
+            df_flash = get_flashes(fname, i_file, chunk_size=chunk_size, verbose=False)
+            results['flash'] = df_flash
+        else:
+            df_flash = None
+
+        # Extract sum TPC hits
+        if 'sum_tpc' in stages or 'all' in stages:
+            df_sum_tpc = get_sum_tpc_hits(fname, i_file, chunk_size=chunk_size, verbose=False)
+            results['sum_tpc'] = df_sum_tpc
+        else:
+            df_sum_tpc = None
+
         # Extract sum hits
         if 'sum' in stages or 'all' in stages:
             df_sum = get_sum_hits(fname, i_file, chunk_size=chunk_size, verbose=False)
@@ -672,11 +1047,31 @@ def process_single_file(args_tuple):
         else:
             df_sum = None
 
-        # Match for this file
-        if 'match' in stages or 'all' in stages:
+        # Matching - do progressively on same dataframe
+        df_matched = None
+
+        # Match sum hits - start with truth
+        if 'match' in stages or 'match_sum' in stages or 'all' in stages:
             if df_truth is not None and df_sum is not None:
                 df_matched = match_truth_sum_single_file(df_truth, df_sum, tol_us=tol_us, verbose=False)
-                results['matched'] = df_matched
+
+        # Match flashes - add columns to existing matched df
+        if 'match' in stages or 'match_flash' in stages or 'all' in stages:
+            if df_truth is not None and df_flash is not None:
+                if df_matched is None:
+                    df_matched = df_truth.copy()
+                df_matched = match_truth_flash_single_file(df_matched, df_flash, tol_us=tol_us, verbose=False)
+
+        # Match sum TPC hits - add columns to existing matched df
+        if 'match' in stages or 'match_sum_tpc' in stages or 'all' in stages:
+            if df_truth is not None and df_sum_tpc is not None:
+                if df_matched is None:
+                    df_matched = df_truth.copy()
+                df_matched = match_truth_sum_tpc_single_file(df_matched, df_sum_tpc, tol_us=tol_us, verbose=False)
+
+        # Store the single matched result
+        if df_matched is not None:
+            results['matched'] = df_matched
 
         return (i_file, results, None)
 
@@ -741,14 +1136,60 @@ def main():
 
     truth_path = data_path(args.outdir, f'truth_{nfiles_str}', tag=args.tag)
     sum_hits_path = data_path(args.outdir, f'sum_hits_{nfiles_str}', tag=args.tag)
+    sum_tpc_hits_path = data_path(args.outdir, f'sum_tpc_hits_{nfiles_str}', tag=args.tag)
+    flash_path = data_path(args.outdir, f'flashes_{nfiles_str}', tag=args.tag)
     matched_path = data_path(args.outdir, f'truth_reco_match_{nfiles_str}', tag=args.tag)
 
-    # Clear output files if overwrite
+    # Clear output files if overwrite, but only for specified stages
     if args.overwrite:
-        for path in [truth_path, sum_hits_path, matched_path]:
-            if os.path.exists(path):
+        stage_file_map = {
+            'truth': truth_path,
+            'flash': flash_path,
+            'sum_tpc': sum_tpc_hits_path,
+            'sum': sum_hits_path,
+            'match_sum': matched_path,
+            'match_flash': matched_path,
+            'match_sum_tpc': matched_path,
+            'match': matched_path
+        }
+        stages_to_clear = set(args.stage)
+        if 'all' in stages_to_clear:
+            stages_to_clear = set(stage_file_map.keys())
+        cleared = set()
+        for stage in stages_to_clear:
+            path = stage_file_map.get(stage)
+            if path and os.path.exists(path) and path not in cleared:
                 os.remove(path)
                 print(f"Removed existing file: {path}")
+                cleared.add(path)
+    else:
+        # Check for existing files
+        print("\n" + "="*80)
+        print("Checking for existing output files...")
+        print("="*80)
+        stage_file_map = {
+            'truth': truth_path,
+            'flash': flash_path,
+            'sum_tpc': sum_tpc_hits_path,
+            'sum': sum_hits_path,
+            'match_sum': matched_path,
+            'match_flash': matched_path,
+            'match_sum_tpc': matched_path,
+            'match': matched_path
+        }
+
+        for stage, path in stage_file_map.items():
+            if (stage in args.stage or 'all' in args.stage) and os.path.exists(path):
+                file_size = os.path.getsize(path) / (1024 * 1024)  # Size in MB
+                print(f"  ✓ Found existing: {os.path.basename(path)} ({file_size:.2f} MB)")
+
+        if args.resume:
+            print("\n  Resume mode: Will skip files already in output CSVs")
+        else:
+            print("\n  Note: Data will be APPENDED to existing files.")
+            print("  Use --resume to skip already-processed files.")
+            print("  Use --overwrite to delete and recreate from scratch.")
+        print("="*80)
 
     # Process files
     start_time = time.time()
@@ -785,6 +1226,10 @@ def main():
             if file_results:
                 if 'truth' in file_results:
                     append_dataframe(file_results['truth'], truth_path)
+                if 'flash' in file_results:
+                    append_dataframe(file_results['flash'], flash_path)
+                if 'sum_tpc' in file_results:
+                    append_dataframe(file_results['sum_tpc'], sum_tpc_hits_path)
                 if 'sum' in file_results:
                     append_dataframe(file_results['sum'], sum_hits_path)
                 if 'matched' in file_results:
@@ -808,30 +1253,157 @@ def main():
             print(f"{'='*80}")
 
             try:
-                # Extract truth
+                # Check if file already processed (resume mode)
+                if args.resume:
+                    skip_file = True
+                    # For each requested stage, check if output exists and is complete for this file_id
+                    for stage, path in [('truth', truth_path), ('sum', sum_hits_path), ('flash', flash_path),
+                                       ('sum_tpc', sum_tpc_hits_path), ('match_sum', matched_path),
+                                       ('match_flash', matched_path), ('match_sum_tpc', matched_path),
+                                       ('match', matched_path)]:
+                        if (stage in args.stage or 'all' in args.stage) and os.path.exists(path):
+                            try:
+                                df_check = pd.read_csv(path)
+                                if i_file not in df_check['file_id'].values:
+                                    skip_file = False
+                                    break
+                                # For match stages, check if required columns are present and filled
+                                if stage in ['match', 'match_sum', 'match_flash', 'match_sum_tpc']:
+                                    # Determine required columns for each match stage
+                                    required_cols = []
+                                    if stage in ['match', 'match_sum']:
+                                        required_cols += [f'det_{i}' for i in range(16)]
+                                    if stage in ['match', 'match_flash']:
+                                        required_cols += ['flash_matched']
+                                    if stage in ['match', 'match_sum_tpc']:
+                                        required_cols += ['trap_0_matched', 'trap_1_matched']
+                                    # Only check columns that exist in the file
+                                    missing_cols = [col for col in required_cols if col not in df_check.columns]
+                                    if missing_cols:
+                                        skip_file = False
+                                        break
+                                    # Check if all required columns are non-null for this file_id
+                                    df_file = df_check[df_check['file_id'] == i_file]
+                                    for col in required_cols:
+                                        if df_file[col].isnull().any():
+                                            skip_file = False
+                                            break
+                                    if not skip_file:
+                                        break
+                            except Exception as e:
+                                skip_file = False
+                                break
+                    if skip_file:
+                        print(f"  ⏭ Skipping (already processed in resume mode)")
+                        continue
+
+                # Initialize variables
                 df_truth = None
                 df_sum = None
+                df_flash = None
+                df_sum_tpc = None
                 df_matched = None
 
+                # For matching stages, try to load existing data first
+                matching_requested = any(s in args.stage for s in ['match', 'match_sum', 'match_flash', 'match_sum_tpc']) or 'all' in args.stage
+                extraction_requested = any(s in args.stage for s in ['truth', 'sum', 'flash', 'sum_tpc']) or 'all' in args.stage
+
+                # If only matching is requested and files exist, load from existing CSVs
+                if matching_requested and not extraction_requested:
+                    print(f"  Loading existing data for matching...")
+                    if 'match' in args.stage or 'match_sum' in args.stage or 'match_flash' in args.stage or 'match_sum_tpc' in args.stage or 'all' in args.stage:
+                        if os.path.exists(truth_path):
+                            df_truth_full = pd.read_csv(truth_path)
+                            df_truth = df_truth_full[df_truth_full['file_id'] == i_file].copy()
+                            print(f"    Loaded {len(df_truth)} truth entries from existing file")
+                        else:
+                            print(f"    ⚠ Warning: truth file not found at {truth_path}")
+                            print(f"    Cannot perform matching without truth data. Skipping...")
+                            continue
+
+                    if 'match' in args.stage or 'match_sum' in args.stage or 'all' in args.stage:
+                        if os.path.exists(sum_hits_path):
+                            df_sum_full = pd.read_csv(sum_hits_path)
+                            df_sum = df_sum_full[df_sum_full['file_id'] == i_file].copy()
+                            print(f"    Loaded {len(df_sum)} sum hits from existing file")
+
+                    if 'match' in args.stage or 'match_flash' in args.stage or 'all' in args.stage:
+                        if os.path.exists(flash_path):
+                            df_flash_full = pd.read_csv(flash_path)
+                            df_flash = df_flash_full[df_flash_full['file_id'] == i_file].copy()
+                            print(f"    Loaded {len(df_flash)} flashes from existing file")
+
+                    if 'match' in args.stage or 'match_sum_tpc' in args.stage or 'all' in args.stage:
+                        if os.path.exists(sum_tpc_hits_path):
+                            df_sum_tpc_full = pd.read_csv(sum_tpc_hits_path)
+                            df_sum_tpc = df_sum_tpc_full[df_sum_tpc_full['file_id'] == i_file].copy()
+                            print(f"    Loaded {len(df_sum_tpc)} sum TPC hits from existing file")
+
+                # Extract truth (if requested or needed for matching)
                 if 'truth' in args.stage or 'all' in args.stage:
                     print(f"  Extracting truth...")
                     df_truth = get_truth(fname, i_file, args.ph_th, args.dE_th, chunk_size=args.chunk_size, verbose=True)
                     append_dataframe(df_truth, truth_path)
                     print(f"    -> {len(df_truth)} truth entries")
 
-                # Extract sum hits
-                if 'sum' in args.stage or 'all' in args.stage:
+                # Extract flashes (if not already loaded)
+                if ('flash' in args.stage or 'all' in args.stage) and df_flash is None:
+                    print(f"  Extracting flashes...")
+                    df_flash = get_flashes(fname, i_file, chunk_size=args.chunk_size, verbose=True)
+                    append_dataframe(df_flash, flash_path)
+                    print(f"    -> {len(df_flash)} flashes")
+
+                # Extract sum TPC hits (if not already loaded)
+                if ('sum_tpc' in args.stage or 'all' in args.stage) and df_sum_tpc is None:
+                    print(f'  Extracting sum TPC hits...')
+                    df_sum_tpc = get_sum_tpc_hits(fname, i_file, chunk_size=args.chunk_size, verbose=True)
+                    append_dataframe(df_sum_tpc, sum_tpc_hits_path)
+                    print(f'    -> {len(df_sum_tpc)} sum TPC hits')
+
+                # Extract sum hits (if not already loaded)
+                if ('sum' in args.stage or 'all' in args.stage) and df_sum is None:
                     print(f"  Extracting sum hits...")
                     df_sum = get_sum_hits(fname, i_file, chunk_size=args.chunk_size, verbose=True)
                     append_dataframe(df_sum, sum_hits_path)
                     print(f"    -> {len(df_sum)} sum hits")
 
-                # Match for this file
-                if 'match' in args.stage or 'all' in args.stage:
-                    print(f"  Matching truth to reco...")
-                    df_matched = match_truth_sum_single_file(df_truth, df_sum, tol_us=0.16, verbose=True)
+                # Match sum hits (truth to reco) - start with truth
+                df_matched = None
+                if 'match' in args.stage or 'match_sum' in args.stage or 'all' in args.stage:
+                    if df_truth is not None and df_sum is not None:
+                        print(f"  Matching truth to sum hits...")
+                        df_matched = match_truth_sum_single_file(df_truth, df_sum, tol_us=0.16, verbose=True)
+                        print(f"    -> {len(df_matched)} matched entries")
+                    else:
+                        print(f"  ⚠ Skipping match_sum: missing truth or sum data")
+                        if df_truth is not None:
+                            df_matched = df_truth.copy()  # Start with truth for other matches
+
+                # Match flashes - add columns to existing matched df
+                if 'match' in args.stage or 'match_flash' in args.stage or 'all' in args.stage:
+                    if df_truth is not None and df_flash is not None:
+                        if df_matched is None:
+                            df_matched = df_truth.copy()
+                        print(f"  Matching truth to flashes (adding columns)...")
+                        df_matched = match_truth_flash_single_file(df_matched, df_flash, tol_us=0.16, verbose=True)
+                        print(f"    -> {len(df_matched)} total entries with flash columns")
+                    else:
+                        print(f"  ⚠ Skipping match_flash: missing truth or flash data")
+
+                # Match sum TPC hits - add columns to existing matched df
+                if 'match' in args.stage or 'match_sum_tpc' in args.stage or 'all' in args.stage:
+                    if df_truth is not None and df_sum_tpc is not None:
+                        if df_matched is None:
+                            df_matched = df_truth.copy()
+                        print(f"  Matching truth to sum TPC hits (adding columns)...")
+                        df_matched = match_truth_sum_tpc_single_file(df_matched, df_sum_tpc, tol_us=0.16, verbose=True)
+                        print(f"    -> {len(df_matched)} total entries with sum TPC columns")
+                    else:
+                        print(f"  ⚠ Skipping match_sum_tpc: missing truth or sum TPC data")
+
+                # Write the combined matched dataframe
+                if df_matched is not None:
                     append_dataframe(df_matched, matched_path)
-                    print(f"    -> {len(df_matched)} matched entries")
 
                 file_elapsed = time.time() - file_start
                 print(f"  File completed in {file_elapsed:.1f}s")
@@ -847,7 +1419,7 @@ def main():
                 continue
 
     # POST-PROCESSING: Add delta columns if matching was performed
-    if 'match' in args.stage or 'all' in args.stage:
+    if 'match' in args.stage or 'match_sum' in args.stage or 'all' in args.stage:
         print(f"\n{'='*80}")
         print("POST-PROCESSING: Adding delta columns")
         print(f"{'='*80}")

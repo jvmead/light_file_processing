@@ -184,7 +184,7 @@ def get_truth(filename, file_id=0, n_photons_threshold=0, dE_threshold=0.0):
 
                 # Create vertex-local arrays for use with tpc_segs indices
                 seg_de = seg_de_tot[ev_seg_vertex]
-                seg_nphotons = all_n_photons[ev_seg_vertex]
+                eg_nphotons = all_n_photons[ev_seg_vertex]
 
                 int_x = all_int_vertex_x[ev_seg_vertex]
                 int_y = all_int_vertex_y[ev_seg_vertex]
@@ -1017,7 +1017,7 @@ def main():
     print("="*80)
     if 'sum' in args.stage or 'all' in args.stage:
       path = data_path(args.outdir, f'sum_hits_{nfiles_str}')
-      print(f"Sum hits output path: {path}")
+      print(f"Sum hits output path: {path}")get_sum_tpc_hits
       if not os.path.exists(path) or args.overwrite:
         print(f"Processing sum hits data (overwrite={args.overwrite})...")
         df = pd.concat([get_sum_hits(f, i) for i, f in enumerate(fnames)], ignore_index=True)
