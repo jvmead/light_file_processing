@@ -131,6 +131,42 @@ Quantile analysis of detector response in voxelized space:
 
 <img src="voxel_quantile.png" alt="Voxel quantile analysis" width="600"/>
 
+### Efficiency Analysis
+Detection efficiency as a function of various event properties:
+
+<table>
+  <tr>
+    <td><img src="dE_tot_eff.png" alt="Efficiency vs total deposited energy" width="400"/></td>
+    <td><img src="delta_t0_eff.png" alt="Efficiency vs timing offset" width="400"/></td>
+  </tr>
+  <tr>
+    <td align="center">Efficiency vs total deposited energy</td>
+    <td align="center">Efficiency vs timing offset (delta t0)</td>
+  </tr>
+  <tr>
+    <td><img src="eff_xyz_non_localized.png" alt="Non-localized efficiency in XYZ" width="400"/></td>
+    <td><img src="comparison_histograms.png" alt="Comparison histograms" width="400"/></td>
+  </tr>
+  <tr>
+    <td align="center">Non-localized efficiency in XYZ space</td>
+    <td align="center">Distribution comparisons</td>
+  </tr>
+</table>
+
+### Pileup Analysis
+Analysis of pileup effects on reconstruction efficiency and fake rate:
+
+<table>
+  <tr>
+    <td><img src="pileup_eff.png" alt="Pileup efficiency" width="400"/></td>
+    <td><img src="pileup_fakes.png" alt="Pileup fakes" width="400"/></td>
+  </tr>
+  <tr>
+    <td align="center">Reconstruction efficiency vs pileup</td>
+    <td align="center">Fake rate vs pileup</td>
+  </tr>
+</table>
+
 ---
 
 ## Deprecated: Original Processing Script
